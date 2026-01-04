@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -34,10 +35,28 @@ type TransactionRow struct {
 func ProcessJob(job *worker.Job, db *sqlx.DB, w *worker.Worker) error {
 	startTime := time.Now()
 	log.Printf("Starting CSV processing: batch_id=%s", job.BatchID)
+	log.Printf("Job details: file_path=%s, file_content_len=%d", job.FilePath, len(job.FileContent))
 
-	// Check if file content is available in database (preferred for Render multi-instance)
-	if len(job.FileContent) == 0 {
-		return fmt.Errorf("file content not found in database for batch %s", job.BatchID)
+	// Get file content - prefer database, fallback to file system
+	var fileContent []byte
+	var err error
+	
+	if job.FileContent != nil && len(job.FileContent) > 0 {
+		fileContent = job.FileContent
+		log.Printf("Using file content from database (%d bytes)", len(fileContent))
+	} else if job.FilePath != "" {
+		// Fallback: read from file system
+		fileContent, err = os.ReadFile(job.FilePath)
+		if err != nil {
+			return fmt.Errorf("failed to read file from path %s: %w", job.FilePath, err)
+		}
+		log.Printf("Read file from disk: %s (%d bytes)", job.FilePath, len(fileContent))
+	} else {
+		return fmt.Errorf("file content not found in database for batch %s (file_content is nil/empty and file_path is empty)", job.BatchID)
+	}
+
+	if len(fileContent) == 0 {
+		return fmt.Errorf("file content is empty for batch %s", job.BatchID)
 	}
 
 	// Load invoice cache
@@ -59,8 +78,8 @@ func ProcessJob(job *worker.Job, db *sqlx.DB, w *worker.Worker) error {
 		MatchedInvoices: make(map[string]bool),
 	}
 
-	// Process CSV from database content
-	err = processor.processCSVFromContent(job.FileContent)
+	// Process CSV from content (database or file system)
+	err = processor.processCSVFromContent(fileContent)
 	if err != nil {
 		return fmt.Errorf("CSV processing failed: %w", err)
 	}
@@ -169,16 +188,10 @@ func (p *Processor) processCSVFromContent(fileContent []byte) error {
 	log.Printf("Processing complete: processed=%d, invalid=%d, auto_matched=%d, needs_review=%d, unmatched=%d",
 		processedCount, invalidRows, autoMatchedCount, needsReviewCount, unmatchedCount)
 
-	// Final update: set total transactions and final counts
-	err = p.Worker.SetBatchTotal(p.BatchID, processedCount)
+	// Final update: set total transactions and final counts in a single query
+	err = p.Worker.SetBatchTotalAndProgress(p.BatchID, processedCount, autoMatchedCount, needsReviewCount, unmatchedCount)
 	if err != nil {
-		return fmt.Errorf("failed to set total transactions: %w", err)
-	}
-
-	// Final count update to ensure accuracy
-	err = p.Worker.UpdateBatchProgress(p.BatchID, processedCount, autoMatchedCount, needsReviewCount, unmatchedCount)
-	if err != nil {
-		log.Printf("Warning: Failed to update final batch counts: %v", err)
+		return fmt.Errorf("failed to set total transactions and final counts: %w", err)
 	}
 
 	return nil

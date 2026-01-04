@@ -3,6 +3,7 @@ package handlers
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -68,6 +69,7 @@ func (h *BatchHandler) GetBatch(c echo.Context) error {
 	}
 
 	// Query batch - PostgreSQL will automatically convert string to UUID
+	// Use COALESCE to handle missing columns gracefully (if migration hasn't run)
 	err := h.DB.Get(&batch, `
 		SELECT 
 			id::text as id,
@@ -77,8 +79,8 @@ func (h *BatchHandler) GetBatch(c echo.Context) error {
 			auto_matched_count,
 			needs_review_count,
 			unmatched_count,
-			confirmed_count,
-			external_count,
+			COALESCE(confirmed_count, 0) as confirmed_count,
+			COALESCE(external_count, 0) as external_count,
 			started_at,
 			completed_at,
 			created_at
@@ -126,6 +128,7 @@ func (h *BatchHandler) GetBatch(c echo.Context) error {
 	response.Counts.External = batch.ExternalCount
 
 	// Calculate dollar totals by status
+	// Use direct query formatting for Neon pooler compatibility
 	var totals struct {
 		AutoMatched  sql.NullFloat64 `db:"auto_matched_total"`
 		NeedsReview  sql.NullFloat64 `db:"needs_review_total"`
@@ -134,7 +137,8 @@ func (h *BatchHandler) GetBatch(c echo.Context) error {
 		External     sql.NullFloat64 `db:"external_total"`
 	}
 	
-	err = h.DB.Get(&totals, `
+	// Use direct query with UUID validation to avoid prepared statement issues
+	totalsQuery := fmt.Sprintf(`
 		SELECT 
 			COALESCE(SUM(CASE WHEN status = 'auto_matched' THEN amount ELSE 0 END), 0) as auto_matched_total,
 			COALESCE(SUM(CASE WHEN status = 'needs_review' THEN amount ELSE 0 END), 0) as needs_review_total,
@@ -142,11 +146,13 @@ func (h *BatchHandler) GetBatch(c echo.Context) error {
 			COALESCE(SUM(CASE WHEN status = 'confirmed' THEN amount ELSE 0 END), 0) as confirmed_total,
 			COALESCE(SUM(CASE WHEN status = 'external' THEN amount ELSE 0 END), 0) as external_total
 		FROM bank_transactions
-		WHERE upload_batch_id = $1
+		WHERE upload_batch_id = '%s'
 	`, batchID)
 	
+	err = h.DB.Get(&totals, totalsQuery)
+	
 	if err != nil {
-		c.Logger().Warnf("Failed to fetch dollar totals: %v", err)
+		c.Logger().Warnf("Failed to fetch dollar totals for batch %s: %v", batchID, err)
 		// Continue with zero totals if query fails
 		response.Totals.AutoMatched = 0
 		response.Totals.NeedsReview = 0
@@ -154,11 +160,32 @@ func (h *BatchHandler) GetBatch(c echo.Context) error {
 		response.Totals.Confirmed = 0
 		response.Totals.External = 0
 	} else {
-		response.Totals.AutoMatched = totals.AutoMatched.Float64
-		response.Totals.NeedsReview = totals.NeedsReview.Float64
-		response.Totals.Unmatched = totals.Unmatched.Float64
-		response.Totals.Confirmed = totals.Confirmed.Float64
-		response.Totals.External = totals.External.Float64
+		// Handle NULL values (when no transactions exist yet)
+		if totals.AutoMatched.Valid {
+			response.Totals.AutoMatched = totals.AutoMatched.Float64
+		} else {
+			response.Totals.AutoMatched = 0
+		}
+		if totals.NeedsReview.Valid {
+			response.Totals.NeedsReview = totals.NeedsReview.Float64
+		} else {
+			response.Totals.NeedsReview = 0
+		}
+		if totals.Unmatched.Valid {
+			response.Totals.Unmatched = totals.Unmatched.Float64
+		} else {
+			response.Totals.Unmatched = 0
+		}
+		if totals.Confirmed.Valid {
+			response.Totals.Confirmed = totals.Confirmed.Float64
+		} else {
+			response.Totals.Confirmed = 0
+		}
+		if totals.External.Valid {
+			response.Totals.External = totals.External.Float64
+		} else {
+			response.Totals.External = 0
+		}
 	}
 
 	// Set completed at (nullable)

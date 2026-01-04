@@ -1,6 +1,7 @@
 package worker
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"log"
@@ -123,12 +124,32 @@ func (w *Worker) claimJob() (*Job, error) {
 	`
 
 	var job Job
-	err = tx.Get(&job, query, fmt.Sprintf("%d minutes", int(w.StaleThreshold.Minutes())))
+	var fileContentBytes []byte // Use []byte directly, NULL will be nil
+	err = tx.QueryRow(query, fmt.Sprintf("%d minutes", int(w.StaleThreshold.Minutes()))).Scan(
+		&job.ID,
+		&job.BatchID,
+		&job.FilePath,
+		&fileContentBytes, // Scan directly into []byte - NULL becomes nil
+		&job.Status,
+		&job.Attempts,
+		&job.LastError,
+		&job.CreatedAt,
+		&job.UpdatedAt,
+	)
 	if err == sql.ErrNoRows {
 		return nil, nil // No jobs available
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to query jobs: %w", err)
+	}
+
+	// Assign file content (nil if NULL in database)
+	job.FileContent = fileContentBytes
+	if job.FileContent != nil && len(job.FileContent) > 0 {
+		log.Printf("Loaded file_content from database: %d bytes", len(job.FileContent))
+	} else {
+		log.Printf("Warning: file_content is NULL or empty in database (len=%d), will use file_path fallback: %s", 
+			len(job.FileContent), job.FilePath)
 	}
 
 	// Update job to processing
@@ -148,7 +169,8 @@ func (w *Worker) claimJob() (*Job, error) {
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	log.Printf("Claimed job: id=%s, batch_id=%s, file_path=%s", job.ID, job.BatchID, job.FilePath)
+	log.Printf("Claimed job: id=%s, batch_id=%s, file_path=%s, file_content_len=%d", 
+		job.ID, job.BatchID, job.FilePath, len(job.FileContent))
 	return &job, nil
 }
 
@@ -324,7 +346,46 @@ func (w *Worker) SetBatchTotal(batchID string, total int) error {
 		WHERE id = '%s'
 	`, total, batchID)
 	
-	_, err := w.DB.DB.Exec(query)
+	// Get a fresh connection to avoid prepared statement issues
+	ctx := context.Background()
+	conn, err := w.DB.DB.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get connection: %w", err)
+	}
+	defer conn.Close()
+	
+	_, err = conn.ExecContext(ctx, query)
+	return err
+}
+
+// SetBatchTotalAndProgress sets total_transactions and final counts in a single query
+// Uses direct query formatting to avoid prepared statement issues with Neon pooler
+func (w *Worker) SetBatchTotalAndProgress(batchID string, total, autoMatched, needsReview, unmatched int) error {
+	// Validate batchID is a valid UUID to prevent SQL injection
+	if _, err := uuid.Parse(batchID); err != nil {
+		return fmt.Errorf("invalid batch ID: %w", err)
+	}
+	
+	// Format query directly to avoid prepared statements (safe since we validate UUID and use integers)
+	query := fmt.Sprintf(`
+		UPDATE reconciliation_batches
+		SET total_transactions = %d,
+		    processed_count = %d,
+		    auto_matched_count = %d,
+		    needs_review_count = %d,
+		    unmatched_count = %d
+		WHERE id = '%s'
+	`, total, total, autoMatched, needsReview, unmatched, batchID)
+	
+	// Get a fresh connection to avoid prepared statement issues
+	ctx := context.Background()
+	conn, err := w.DB.DB.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get connection: %w", err)
+	}
+	defer conn.Close()
+	
+	_, err = conn.ExecContext(ctx, query)
 	return err
 }
 
