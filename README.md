@@ -705,10 +705,10 @@ Streaming CSV parsing combined with batched database writes and an in-memory inv
 
 **Results:**
 
-| Transaction Count | Processing Time | Throughput | Memory Usage |
-|-------------------|----------------|------------|--------------|
-| 1,000 transactions | **3-5 seconds** | ~200-333 tx/sec | ~50MB |
-| 10,000 transactions | **13-15 seconds** | ~667-769 tx/sec | ~80MB |
+| Transaction Count | Processing Time | Throughput |
+|-------------------|----------------|------------|
+| 1,000 transactions | **3-5 seconds** | ~200-333 tx/sec |
+| 10,000 transactions | **13-15 seconds** | ~667-769 tx/sec |
 
 **Performance Breakdown:**
 - **Invoice Cache Loading:** ~50-100ms (500 invoices)
