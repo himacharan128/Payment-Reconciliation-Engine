@@ -152,75 +152,51 @@ See `README_DEPLOYMENT.md` for detailed deployment instructions for Render, Verc
 
 ## Application Architecture
 
-### Two-Service Design: API + Worker
+### API + Worker (two-service design)
 
-**Why Separate Services?**
+The system runs as:
+- **API Server** (handles HTTP + uploads)
+- **Worker** (processes CSV jobs in the background)
 
-The application uses two distinct services: **API Server** and **Background Worker**. This separation provides several critical benefits:
+**Why split them**
+- Uploads return immediately with a `batchId` (no long-running requests)
+- CPU-heavy CSV processing happens asynchronously
+- API stays responsive even if processing fails
+- Progress can be tracked reliably
 
-1. **Non-Blocking Uploads:**
-   - CSV upload endpoint (`POST /api/reconciliation/upload`) returns immediately with a `batchId`
-   - File is stored and job is enqueued in <1 second
-   - User doesn't wait for processing to complete (could be minutes for large files)
-   - Better user experience - no timeouts or browser hangs
+**How they communicate**
+- API enqueues jobs in `reconciliation_jobs`
+- Worker updates progress in `reconciliation_batches`
+- Frontend polls `GET /api/reconciliation/:batchId` for status
 
-2. **Independent Scaling:**
-   - API servers handle HTTP requests (stateless, horizontally scalable)
-   - Workers handle CPU-intensive processing (can scale independently)
-   - Can run multiple workers for parallel batch processing
-   - Can scale API servers for high concurrent user load
-
-3. **Fault Isolation:**
-   - If processing fails, API remains responsive
-   - Worker crashes don't affect API availability
-   - Can restart workers without disrupting user sessions
-   - Failed jobs can be retried independently
-
-4. **Resource Optimization:**
-   - API servers optimized for low-latency HTTP responses
-   - Workers optimized for throughput (batch processing)
-   - Different resource requirements (API: memory/network, Worker: CPU/memory)
-   - Can deploy workers on different instance types
-
-5. **Progress Tracking:**
-   - Worker updates progress independently
-   - Frontend polls API for status (no long-running connections)
-   - Multiple users can monitor same batch progress
-   - Progress persists even if user closes browser
-
-**Communication Pattern:**
-- **API → Worker:** Database-backed job queue (`reconciliation_jobs` table)
-- **Worker → API:** Progress updates via `reconciliation_batches` table
-- **Frontend → API:** Polls `GET /api/reconciliation/:batchId` for status
-- **No Direct Communication:** Services communicate only through database (decoupled)
-
-**Code Locations:**
-- API Server: `backend/cmd/api/main.go`
+**Code locations**
+- API: `backend/cmd/api/main.go`
 - Worker: `backend/cmd/worker/main.go`
-- Job Queue: `backend/internal/worker/job.go`
+- Job queue logic: `backend/internal/worker/job.go`
+
 
 ---
 
 ### Why Echo Framework?
 
-**Echo was chosen for its excellent fit with CSV upload and streaming processing requirements.**
+Echo was chosen because it fits CSV uploads, streaming, and a production-style API without unnecessary complexity.
 
-**1. CSV Upload + Streaming Processing:**
-- Echo is built on `net/http`, providing native support for multipart file uploads
-- Can accept multipart files and stream parse them row-by-row without loading the entire file into memory
-- Immediately enqueue work and update progress without blocking
-- Echo doesn't interfere with request body handling - multipart handling is straightforward ("one screen of code")
+**Key reasons**
+- Built on Go’s `net/http`, so multipart CSV uploads are simple and efficient
+- Supports streaming request bodies (no need to load full files into memory)
+- Makes it easy to enqueue background work and return responses immediately
+- Minimal abstractions — upload handling stays clear and readable
 
-**2. Middleware Story for Production Concerns:**
-For a take-home assessment, we want to show "production instincts" without overbuilding:
-- **Request IDs:** Track requests across services with correlation IDs
-- **Structured Logging:** JSON logs with request context
-- **Panic Recovery:** Graceful error handling without crashing
-- **CORS:** Cross-origin support for frontend
-- **Auth:** Simple token-based authentication (ready for production)
-- **Rate Limits:** Optional protection against abuse
+**Production-ready middleware**
+Echo provides a clean middleware model for:
+- Request IDs and correlation
+- Structured logging
+- Panic recovery
+- CORS handling
+- Optional auth and rate limiting
 
-Echo's middleware ecosystem is direct and consistent - easy to add production-ready features.
+This allows the project to demonstrate good production instincts while keeping the codebase small and easy to reason about.
+
 
 **3. Progress Updates (Polling or SSE):**
 The BRD's reconciliation batch status flow can be done with:
@@ -330,73 +306,67 @@ Echo makes both clean because:
 └──────────────────────────────────────┘
 ```
 
-### Detailed Step-by-Step Flow
+### Application Flow
 
-**1. CSV Upload (Frontend → API)**
-- User selects CSV file in frontend
-- Frontend sends `POST /api/reconciliation/upload` with multipart file
-- API validates file (CSV format, size limits, required columns)
-- API stores file content in database (`reconciliation_jobs.file_content`)
-- API creates `reconciliation_batches` record (status: `processing`)
-- API creates `reconciliation_jobs` record (status: `queued`)
-- API returns `batchId` immediately (<1 second)
+**1. CSV Upload**
+- User uploads a CSV from the frontend
+- Frontend calls `POST /api/reconciliation/upload`
+- API validates the file (format, size, required columns)
+- API creates:
+  - a batch (`reconciliation_batches`, status `processing`)
+  - a job (`reconciliation_jobs`, status `queued`)
+- API returns `batchId` immediately
 
-**2. Job Processing (Worker)**
-- Worker polls database every 1 second for queued jobs
-- Worker claims job using `SELECT ... FOR UPDATE SKIP LOCKED`
-- Worker updates job status to `processing`
-- Worker loads eligible invoices into memory cache (one-time, ~50-100ms)
-- Worker streams CSV file content row-by-row (no memory spike)
+**2. Background Processing**
+- Worker polls the database for queued jobs
+- Claims a job using `SELECT ... FOR UPDATE SKIP LOCKED`
+- Loads eligible invoices into an in-memory cache
+- Streams the CSV row-by-row (constant memory)
 - For each transaction:
-  - Extract amount → lookup invoices with matching amount from cache
-  - Extract name from description → normalize
-  - Calculate match score (Jaro-Winkler + date adjustment - ambiguity penalty)
-  - Determine status bucket (`auto_matched`, `needs_review`, `unmatched`)
-- Accumulate transactions in batches of 500
-- Insert batch into `bank_transactions` table (multi-row INSERT)
-- Update batch progress every 200 rows (`processed_count`, status counters)
-- Finalize batch: set `total_transactions`, final counts, status `completed`
+  - Match by exact amount
+  - Score name similarity + date proximity
+  - Apply ambiguity penalty
+  - Assign status (`auto_matched`, `needs_review`, `unmatched`)
+- Inserts transactions in batches of 500
+- Updates batch progress periodically
+- Finalizes batch with totals and status `completed`
 
-**3. Progress Tracking (Frontend → API)**
-- Frontend polls `GET /api/reconciliation/:batchId` every 1-2 seconds
-- API queries `reconciliation_batches` table
-- Returns: `status`, `processedCount`, `totalTransactions`, `counts`, `totals`
-- Frontend displays progress bar, counts, and dollar totals
-- When `status === 'completed'`, frontend redirects to dashboard
+**3. Progress Tracking**
+- Frontend polls `GET /api/reconciliation/:batchId`
+- API returns batch status, counts, and progress
+- UI shows live progress
+- On completion, frontend navigates to the dashboard
 
-**4. Dashboard View (Frontend → API)**
-- Frontend loads batch summary: `GET /api/reconciliation/:batchId`
-- Frontend loads transactions: `GET /api/reconciliation/:batchId/transactions?status=all&limit=50`
-- User can filter by status tabs (All, Auto-Matched, Needs Review, etc.)
-- User can paginate using cursor-based pagination
-- User can perform actions (Confirm, Reject, Manual Match, Mark External)
+**4. Dashboard**
+- Loads batch summary and transactions list
+- Uses cursor-based pagination (50 rows per page)
+- Supports status tabs (All, Auto-Matched, Needs Review, etc.)
+- Users can confirm, reject, manually match, or mark external
 
-**5. Manual Match Flow**
-- User clicks "Find Match" on unmatched transaction
-- Frontend opens modal with search form
-- User enters search criteria (name, amount, date range, status)
-- Frontend calls `GET /api/invoices/search` with debounced query (500ms)
+**5. Manual Matching**
+- User opens “Find Match” on an unmatched transaction
+- Frontend searches invoices via `GET /api/invoices/search`
 - Backend uses trigram indexes for fast fuzzy search
-- Frontend displays matching invoices
-- User selects invoice → Frontend calls `POST /api/transactions/:id/match`
-- Backend updates transaction, creates audit log, updates batch counters
-- Frontend refreshes transaction list
+- User selects an invoice
+- Frontend calls `POST /api/transactions/:id/match`
+- Backend updates transaction and writes audit log
 
 **6. Bulk Actions**
-- User clicks "Confirm All Auto-Matched"
-- Frontend calls `POST /api/transactions/bulk-confirm?batchId=...`
-- Backend performs single SQL UPDATE for all matching transactions
-- Backend creates bulk audit log entries
-- Backend updates batch counters atomically
-- Frontend refreshes dashboard
+- User confirms all auto-matched transactions
+- Frontend calls `POST /api/transactions/bulk-confirm`
+- Backend performs a single set-based SQL update
+- Audit logs and counters are updated atomically
 
-### Key Data Flow Points
+---
 
-- **File Storage:** CSV content stored in `reconciliation_jobs.file_content` (BYTEA) for multi-instance compatibility
-- **Job Queue:** Database table (`reconciliation_jobs`) acts as message queue
-- **Progress Updates:** Worker writes to `reconciliation_batches` table, API reads for frontend
-- **Transaction Storage:** All transactions stored in `bank_transactions` with match details (JSONB)
-- **Audit Trail:** All actions logged in `match_audit_logs` table (immutable history)
+### Key Data Flow
+
+- **Job Queue:** `reconciliation_jobs` (database-backed queue)
+- **Progress Tracking:** `reconciliation_batches` (updated by worker, read by API)
+- **Transactions:** `bank_transactions` with match details stored as JSONB
+- **Audit Trail:** `match_audit_logs` (append-only, immutable history)
+- **File Storage:** CSV content stored with jobs for multi-instance safety
+
 
 ---
 
@@ -404,18 +374,31 @@ Echo makes both clean because:
 
 ### Matching Algorithm
 
-**Approach:** Multi-factor scoring system using Jaro-Winkler similarity with date proximity adjustments and ambiguity penalties.
+**Approach**  
+A multi-factor scoring system that combines name similarity, date proximity, and ambiguity penalties.
 
-**Why This Approach:**
-1. **Jaro-Winkler Similarity:** Handles name variations effectively (e.g., "SMITH JOHN" → "John Smith", "J. Smith" → "John Smith"). The algorithm accounts for character order, common prefixes, and transpositions, making it robust for real-world name matching scenarios.
+**Key ideas**
+- **Name similarity (Jaro–Winkler):**  
+  Handles common real-world variations such as reordered names or abbreviations (e.g. `SMITH JOHN` → `John Smith`).
 
-2. **Date Proximity Adjustment:** Bank transactions often occur near invoice due dates, but not exactly on them. The algorithm rewards transactions that occur before or shortly after due dates (+5 for before, +2 for 0-7 days after) while penalizing transactions >30 days late (-10 points).
+- **Date proximity adjustment:**  
+  Payments usually happen close to the invoice due date.  
+  - Small bonus for payments before or shortly after due date  
+  - Penalty for transactions more than 30 days late
 
-3. **Ambiguity Penalty:** When multiple invoices share the same amount, the algorithm applies a penalty (-2 points per additional candidate) to prevent false positives. This ensures high-confidence matches only when there's clear evidence.
+- **Ambiguity penalty:**  
+  If multiple invoices share the same amount, the score is reduced to avoid false positives.
 
-4. **Deterministic Tie-Breaking:** When scores are equal, the algorithm prefers:
-   - Smaller absolute date delta (closer to due date)
-   - Earlier due date (older invoices first)
+- **Deterministic tie-breaking:**  
+  When scores are equal, the algorithm consistently prefers:
+  1. Smaller absolute date difference  
+  2. Earlier due date  
+
+This produces transparent, repeatable results and cleanly separates:
+- `auto_matched` (high confidence)
+- `needs_review` (medium confidence)
+- `unmatched` (low confidence)
+
 
 **Scoring Formula:**
 ```
@@ -435,41 +418,31 @@ Final Score = Name Similarity (0-100) + Date Adjustment (-10 to +5) - Ambiguity 
 **Code Location:** `backend/internal/processor/matcher.go`
 
 ---
-
 ### Performance: Large CSV Processing
 
-**Approach:** Streaming CSV parsing with batched database inserts and in-memory invoice caching.
+**Approach**  
+Streaming CSV parsing combined with batched database writes and an in-memory invoice cache.
 
-**Key Optimizations:**
+**Key optimizations**
+- **Streaming CSV parsing:**  
+  Processes rows one at a time using Go’s CSV reader, keeping memory usage constant regardless of file size.
 
-1. **Streaming CSV Parsing:**
-   - Uses Go's `encoding/csv` reader to process files row-by-row
-   - Never loads entire CSV into memory
-   - Memory usage remains stable regardless of file size
+- **Batch inserts:**  
+  Transactions are inserted in batches of 500 rows using multi-row `INSERT`s.  
+  This dramatically reduces database round trips and keeps inserts fast.
 
-2. **Batch Inserts:**
-   - Collects transactions into batches of 500 rows
-   - Uses multi-row `INSERT` statements (single transaction per batch)
-   - Reduces database round trips from N to N/500
-   - Typical batch insert: ~50-100ms for 500 rows
+- **In-memory invoice cache:**  
+  Eligible invoices are loaded once at job start and indexed by amount.  
+  Names are pre-normalized, making matching fast and avoiding per-row database queries.
 
-3. **In-Memory Invoice Cache:**
-   - Loads all eligible invoices (`status IN ('sent', 'overdue')` AND `paid_at IS NULL`) at job start
-   - Indexes by amount: `map[amount][]InvoiceCandidate`
-   - Pre-normalizes customer names (uppercase, remove punctuation, collapse spaces)
-   - Matching becomes O(k) where k = invoices with same amount (typically 1-5 invoices)
-   - Memory footprint: ~500 invoices × ~200 bytes = ~100KB (negligible)
+- **Controlled progress updates:**  
+  Batch progress is updated every 200 rows instead of per row, reducing database contention while still providing live feedback.
 
-4. **Progress Updates:**
-   - Updates batch counters every 200 rows (configurable via `BATCH_PROGRESS_UPDATE_EVERY`)
-   - Avoids database contention from per-row updates
-   - Final update sets total transactions and final counts atomically
-
-**Why This Approach:**
-- **Memory Efficiency:** Streaming prevents memory spikes even with 100K+ transactions
-- **Speed:** Batch inserts are 10-50x faster than individual inserts
-- **Scalability:** Cache eliminates per-transaction database queries (major bottleneck)
-- **Progress Tracking:** Periodic updates provide real-time feedback without performance penalty
+**Why this works**
+- Stable memory usage, even for large CSVs
+- Much faster than row-by-row inserts
+- Minimal database load during processing
+- Accurate, low-cost progress tracking for the UI
 
 **Code Locations:**
 - CSV Processing: `backend/internal/processor/processor.go`
@@ -650,34 +623,40 @@ Final Score = Name Similarity (0-100) + Date Adjustment (-10 to +5) - Ambiguity 
    - **Rate Limiting:** Protect API endpoints from abuse with rate limiting middleware
    - **API Documentation:** OpenAPI/Swagger documentation with interactive testing
 
-### Scaling Limits
+## Trade-offs & Limitations
 
-**Current Architecture Limits:**
+**With more time, the following improvements would add value:**
 
-1. **Database-Backed Job Queue:**
-   - **Limit:** ~1000 concurrent jobs before database contention becomes significant
-   - **Bottleneck:** `SELECT ... FOR UPDATE SKIP LOCKED` queries compete for locks
-   - **Solution:** Migrate to dedicated message queue (RabbitMQ, AWS SQS) for >1000 concurrent jobs
+### Matching
+- Learn scoring weights from historical confirmations (ML-based matching)
+- Allow small amount tolerances for rounding differences
+- Use reference numbers as an additional matching signal
+- Support multi-currency invoices and transactions
 
-2. **In-Memory Invoice Cache:**
-   - **Limit:** ~100K invoices before memory becomes concern (~20MB)
-   - **Bottleneck:** Single worker loads all invoices into memory
-   - **Solution:** Partition cache by date range or use distributed cache (Redis) for >100K invoices
+### Performance
+- Process multiple batches in parallel with worker pools
+- Stream results to the UI (SSE/WebSockets) instead of polling
+- Cache frequently accessed dashboard queries
+- Tune database connection pooling for higher concurrency
 
-3. **Single Worker Instance:**
-   - **Limit:** Processing speed limited by single CPU core
-   - **Bottleneck:** Sequential CSV processing
-   - **Solution:** Horizontal scaling (multiple workers) + parallel batch processing
+### User Experience
+- Better bulk action feedback (progress indicators)
+- Advanced filters (date, amount, confidence range)
+- Export results to CSV/Excel/PDF
+- Visual audit trail for transaction history
 
-4. **File Storage:**
-   - **Limit:** Local filesystem doesn't scale across multiple instances
-   - **Bottleneck:** Worker must access same filesystem as API (or use database storage)
-   - **Solution:** Object storage (S3, GCS) for multi-instance deployments (already implemented via `file_content` column)
+### Reliability & Ops
+- Structured logs with correlation IDs
+- Metrics and alerting for job failures
+- More detailed health checks
+- Automatic retries with backoff for transient errors
 
-5. **PostgreSQL Connection Pool:**
-   - **Limit:** Default connection pool (25 connections) may be insufficient for high concurrency
-   - **Bottleneck:** Connection exhaustion under heavy load
-   - **Solution:** Increase pool size, use connection pooler (PgBouncer), or read replicas
+### Architecture
+- Event-driven extensions for downstream consumers
+- API versioning (`/api/v1`)
+- Rate limiting for public endpoints
+- Generated API documentation (OpenAPI/Swagger)
+
 
 **Estimated Scaling Capacity:**
 - **Current Setup:** Handles ~10K transactions/batch comfortably
