@@ -80,27 +80,40 @@ export default function TransactionDetailPage() {
 
   const matchDetails = transaction.matchDetails || {};
 
-  // Get batchId from URL or transaction
-  const getBatchId = () => {
+  // Get batchId and tab from URL or transaction
+  const getBatchIdAndTab = () => {
     // Try to get from URL search params first (if we came from dashboard)
     const urlParams = new URLSearchParams(window.location.search);
     const batchIdFromUrl = urlParams.get('batchId');
-    if (batchIdFromUrl) return batchIdFromUrl;
+    const tabFromUrl = urlParams.get('tab') || 'all';
+    
+    if (batchIdFromUrl) {
+      return { batchId: batchIdFromUrl, tab: tabFromUrl };
+    }
     
     // Fallback to transaction's uploadBatchId
-    if (transaction?.uploadBatchId) return transaction.uploadBatchId;
+    if (transaction?.uploadBatchId) {
+      return { batchId: transaction.uploadBatchId, tab: 'all' };
+    }
     
     // Last resort: try to get from localStorage (if we stored it)
-    return localStorage.getItem('lastBatchId') || '/reconciliation/new';
+    const lastBatchId = localStorage.getItem('lastBatchId');
+    if (lastBatchId) {
+      return { batchId: lastBatchId, tab: 'all' };
+    }
+    
+    return { batchId: '/reconciliation/new', tab: 'all' };
   };
 
-  const batchId = getBatchId();
+  const { batchId, tab } = getBatchIdAndTab();
 
   return (
     <div className="max-w-6xl mx-auto p-6">
       <div className="mb-4">
         <Link 
-          to={typeof batchId === 'string' && batchId.startsWith('/') ? batchId : `/reconciliation/${batchId}`} 
+          to={typeof batchId === 'string' && batchId.startsWith('/') 
+            ? batchId 
+            : `/reconciliation/${batchId}${tab !== 'all' ? `?tab=${tab}` : ''}`} 
           className="text-blue-600 hover:underline"
         >
           ← Back to Dashboard

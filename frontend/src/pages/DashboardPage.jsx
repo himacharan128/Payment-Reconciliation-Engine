@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useParams, Link } from 'react-router-dom';
+import { useParams, Link, useSearchParams, useNavigate } from 'react-router-dom';
 import { getBatch, listTransactions, bulkConfirm, confirmTransaction, rejectTransaction, markExternal, exportUnmatched } from '../lib/api';
 import { toast } from '../components/Toast';
 import LoadingSpinner from '../components/LoadingSpinner';
@@ -19,8 +19,15 @@ const TABS = [
 
 export default function DashboardPage() {
   const { batchId } = useParams();
+  const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [batch, setBatch] = useState(null);
-  const [activeTab, setActiveTab] = useState('all');
+  const [activeTab, setActiveTab] = useState(() => {
+    // Initialize from URL params, default to 'all'
+    const urlParams = new URLSearchParams(window.location.search);
+    const tabFromUrl = urlParams.get('tab');
+    return tabFromUrl && TABS.some(t => t.id === tabFromUrl) ? tabFromUrl : 'all';
+  });
   const [transactions, setTransactions] = useState([]);
   const [nextCursor, setNextCursor] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -34,6 +41,17 @@ export default function DashboardPage() {
   useEffect(() => {
     loadBatch();
   }, [batchId]);
+
+  // Sync activeTab with URL params when they change (e.g., browser back/forward)
+  useEffect(() => {
+    const tabFromUrl = searchParams.get('tab');
+    const newTab = tabFromUrl && TABS.some(t => t.id === tabFromUrl) ? tabFromUrl : 'all';
+    if (newTab !== activeTab) {
+      setActiveTab(newTab);
+      setTransactions([]);
+      setNextCursor(null);
+    }
+  }, [searchParams]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (batch) {
@@ -79,6 +97,14 @@ export default function DashboardPage() {
     setNextCursor(null);
     setSortColumn(null); // Reset sort when changing tabs
     setSortDirection('asc');
+    // Update URL params to preserve tab state
+    const newSearchParams = new URLSearchParams(searchParams);
+    if (tab === 'all') {
+      newSearchParams.delete('tab');
+    } else {
+      newSearchParams.set('tab', tab);
+    }
+    setSearchParams(newSearchParams, { replace: true });
   };
 
   const handleLoadMore = () => {
@@ -234,7 +260,16 @@ export default function DashboardPage() {
 
   return (
     <div className="max-w-7xl mx-auto p-6">
-      <h1 className="text-2xl font-bold mb-6">Reconciliation Dashboard</h1>
+      <div className="flex justify-between items-center mb-6">
+        <h1 className="text-2xl font-bold">Reconciliation Dashboard</h1>
+        <button
+          onClick={() => navigate('/reconciliation/new')}
+          className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors flex items-center gap-2"
+        >
+          <span>+</span>
+          Upload New Receipt
+        </button>
+      </div>
 
       {/* Summary Cards */}
       <div className="grid grid-cols-5 gap-4 mb-6">
@@ -359,7 +394,7 @@ export default function DashboardPage() {
                     <td className="px-4 py-3 text-sm">
                       {txn.matchedInvoiceId ? (
                         <Link 
-                          to={`/transactions/${txn.id}?batchId=${batchId}`} 
+                          to={`/transactions/${txn.id}?batchId=${batchId}&tab=${activeTab}`} 
                           className="text-blue-600 hover:underline"
                         >
                           View
@@ -432,7 +467,7 @@ export default function DashboardPage() {
                         )}
                         {(txn.status === 'confirmed' || txn.status === 'external') && (
                           <Link
-                            to={`/transactions/${txn.id}?batchId=${batchId}`}
+                            to={`/transactions/${txn.id}?batchId=${batchId}&tab=${activeTab}`}
                             className="px-3 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700 transition-colors inline-block"
                           >
                             View

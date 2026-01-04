@@ -10,10 +10,30 @@ export default function UploadPage() {
   const [processing, setProcessing] = useState(false);
   const [batchId, setBatchId] = useState(null);
   const [progress, setProgress] = useState(null);
+  const [estimatedTotal, setEstimatedTotal] = useState(null);
   const fileInputRef = useRef(null);
   const navigate = useNavigate();
 
-  const handleFileSelect = (e) => {
+  const countCSVRows = async (file) => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const text = e.target.result;
+          const lines = text.split('\n').filter(line => line.trim() !== '');
+          // Subtract 1 for header row
+          const rowCount = Math.max(0, lines.length - 1);
+          resolve(rowCount);
+        } catch (error) {
+          reject(error);
+        }
+      };
+      reader.onerror = () => reject(new Error('Failed to read file'));
+      reader.readAsText(file);
+    });
+  };
+
+  const handleFileSelect = async (e) => {
     const selectedFile = e.target.files?.[0];
     if (selectedFile) {
       if (!selectedFile.name.toLowerCase().endsWith('.csv')) {
@@ -25,10 +45,19 @@ export default function UploadPage() {
         return;
       }
       setFile(selectedFile);
+      
+      // Count rows in CSV file
+      try {
+        const rowCount = await countCSVRows(selectedFile);
+        setEstimatedTotal(rowCount);
+      } catch (error) {
+        console.error('Failed to count CSV rows:', error);
+        setEstimatedTotal(null);
+      }
     }
   };
 
-  const handleDrop = (e) => {
+  const handleDrop = async (e) => {
     e.preventDefault();
     const droppedFile = e.dataTransfer.files[0];
     if (droppedFile) {
@@ -37,6 +66,15 @@ export default function UploadPage() {
         return;
       }
       setFile(droppedFile);
+      
+      // Count rows in CSV file
+      try {
+        const rowCount = await countCSVRows(droppedFile);
+        setEstimatedTotal(rowCount);
+      } catch (error) {
+        console.error('Failed to count CSV rows:', error);
+        setEstimatedTotal(null);
+      }
     }
   };
 
@@ -62,6 +100,17 @@ export default function UploadPage() {
     } catch (error) {
       setUploading(false);
       toast.error(error.message || 'Upload failed');
+    }
+  };
+
+  const handleReset = () => {
+    setFile(null);
+    setBatchId(null);
+    setProcessing(false);
+    setProgress(null);
+    setEstimatedTotal(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
     }
   };
 
@@ -127,13 +176,20 @@ export default function UploadPage() {
           </div>
 
           {file && (
-            <div className="mt-4">
+            <div className="mt-4 flex gap-2">
               <button
                 onClick={handleUpload}
                 disabled={uploading}
                 className="px-6 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 disabled:opacity-50"
               >
                 {uploading ? 'Uploading...' : 'Upload'}
+              </button>
+              <button
+                onClick={handleReset}
+                disabled={uploading}
+                className="px-6 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300 disabled:opacity-50"
+              >
+                Clear
               </button>
             </div>
           )}
@@ -146,14 +202,17 @@ export default function UploadPage() {
             <div className="mt-4 space-y-2">
               <p>
                 Processed {progress.processedCount} of{' '}
-                {progress.totalTransactions || '?'} transactions
+                {progress.totalTransactions || estimatedTotal || 'calculating...'} transactions
               </p>
-              {progress.totalTransactions && (
+              {(progress.totalTransactions || estimatedTotal) && (
                 <div className="w-full bg-gray-200 rounded-full h-2">
                   <div
                     className="bg-blue-600 h-2 rounded-full transition-all"
                     style={{
-                      width: `${progress.progressPercent || 0}%`,
+                      width: `${progress.progressPercent || 
+                        (estimatedTotal && estimatedTotal > 0 
+                          ? (progress.processedCount / estimatedTotal * 100) 
+                          : 0)}%`,
                     }}
                   />
                 </div>
@@ -174,6 +233,14 @@ export default function UploadPage() {
               </div>
             </div>
           )}
+          <div className="mt-6 flex gap-2 justify-center">
+            <button
+              onClick={handleReset}
+              className="px-4 py-2 bg-gray-200 text-gray-700 rounded hover:bg-gray-300"
+            >
+              Upload New File
+            </button>
+          </div>
         </div>
       )}
     </div>
