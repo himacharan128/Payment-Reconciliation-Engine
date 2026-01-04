@@ -7,8 +7,10 @@ frontend/.env.production
 
 # uploads and volumes
 data/uploads/*
+backend/data/uploads/*
 !data/uploads/.gitkeep
 *.log
+logs/
 
 # Go
 backend/bin/

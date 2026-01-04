@@ -37,11 +37,21 @@ func main() {
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 
-	// CORS middleware
+	// CORS middleware - allow all origins
 	corsOrigins := os.Getenv("CORS_ALLOWED_ORIGINS")
 	if corsOrigins != "" {
+		// Use specific origins if provided
 		e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
 			AllowOrigins: []string{corsOrigins},
+			AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
+			AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept},
+		}))
+	} else {
+		// Allow all origins if not specified
+		e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
+			AllowOriginFunc: func(origin string) (bool, error) {
+				return true, nil // Allow all origins
+			},
 			AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
 			AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept},
 		}))
@@ -64,6 +74,15 @@ func main() {
 	e.POST("/api/reconciliation/upload", uploadHandler.Upload)
 	e.GET("/api/reconciliation/:batchId", batchHandler.GetBatch)
 	e.GET("/api/reconciliation/:batchId/transactions", transactionsHandler.ListTransactions)
+	
+	// Debug: List all routes
+	e.GET("/debug/routes", func(c echo.Context) error {
+		routes := []string{}
+		for _, route := range e.Routes() {
+			routes = append(routes, route.Method+" "+route.Path)
+		}
+		return c.JSON(http.StatusOK, map[string]interface{}{"routes": routes})
+	})
 	e.GET("/api/invoices/search", invoicesHandler.SearchInvoices)
 	e.GET("/api/transactions/:id", transactionDetailHandler.GetTransaction)
 	

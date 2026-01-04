@@ -290,8 +290,7 @@ func (w *Worker) UpdateBatchProgress(batchID string, processed, autoMatched, nee
 		SET processed_count = $1,
 		    auto_matched_count = $2,
 		    needs_review_count = $3,
-		    unmatched_count = $4,
-		    updated_at = NOW()
+		    unmatched_count = $4
 		WHERE id = $5
 	`, processed, autoMatched, needsReview, unmatched, batchID)
 	return err

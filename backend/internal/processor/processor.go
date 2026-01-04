@@ -2,6 +2,7 @@ package processor
 
 import (
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -170,10 +171,16 @@ func (p *Processor) processCSV(filePath string) error {
 	log.Printf("Processing complete: processed=%d, invalid=%d, auto_matched=%d, needs_review=%d, unmatched=%d",
 		processedCount, invalidRows, autoMatchedCount, needsReviewCount, unmatchedCount)
 
-	// Set total transactions
+	// Final update: set total transactions and final counts
 	err = p.Worker.SetBatchTotal(p.BatchID, processedCount)
 	if err != nil {
 		return fmt.Errorf("failed to set total transactions: %w", err)
+	}
+
+	// Final count update to ensure accuracy
+	err = p.Worker.UpdateBatchProgress(p.BatchID, processedCount, autoMatchedCount, needsReviewCount, unmatchedCount)
+	if err != nil {
+		log.Printf("Warning: Failed to update final batch counts: %v", err)
 	}
 
 	return nil
@@ -259,12 +266,20 @@ func (p *Processor) flushBatch(
 		// Convert match_details to JSONB-compatible format
 		var matchDetailsJSON interface{}
 		if match.MatchDetails != nil {
-			matchDetailsJSON = match.MatchDetails
+			// Marshal map to JSON bytes for PostgreSQL JSONB
+			jsonBytes, err := json.Marshal(match.MatchDetails)
+			if err != nil {
+				log.Printf("Failed to marshal match_details: %v", err)
+				matchDetailsJSON = "{}"
+			} else {
+				matchDetailsJSON = string(jsonBytes)
+			}
 		} else {
-			matchDetailsJSON = map[string]interface{}{}
+			matchDetailsJSON = "{}"
 		}
 		
-		placeholders = append(placeholders, fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+		// Cast match_details to JSONB in SQL
+		placeholders = append(placeholders, fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d::jsonb)",
 			i*9+1, i*9+2, i*9+3, i*9+4, i*9+5, i*9+6, i*9+7, i*9+8, i*9+9))
 		
 		args = append(args,

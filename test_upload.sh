@@ -7,7 +7,7 @@ echo "Testing upload endpoint..."
 echo "Uploading bank_transactions.csv..."
 
 response=$(curl -s -X POST \
-  -F "file=@seed/data/bank_transactions.csv" \
+  -F "file=@bank_transactions.csv" \
   http://localhost:8080/api/reconciliation/upload)
 
 echo "Response: $response"
