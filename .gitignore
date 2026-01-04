@@ -13,6 +13,8 @@ data/uploads/*
 # Go
 backend/bin/
 backend/tmp/
+backend/api
+backend/worker
 
 # Node
 frontend/node_modules/
