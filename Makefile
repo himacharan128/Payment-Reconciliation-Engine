@@ -36,7 +36,7 @@ dev:
 	@echo "Stopping any existing processes..."
 	@pkill -f "go run ./cmd/api" 2>/dev/null || true
 	@pkill -f "go run ./cmd/worker" 2>/dev/null || true
-	@lsof -ti :8080 | xargs kill -9 2>/dev/null || true
+	@ps aux | grep -E "[g]o run ./cmd/api|[g]o run ./cmd/worker" | awk '{print $$2}' | xargs kill -9 2>/dev/null || true
 	@sleep 1
 	@echo "Starting API and Worker in background..."
 	@set -a && source .env.local && set +a && cd backend && (go run ./cmd/api > ../logs/api.log 2>&1 &) && sleep 1 && (go run ./cmd/worker > ../logs/worker.log 2>&1 &) && sleep 1
@@ -48,7 +48,7 @@ dev:
 stop:
 	@pkill -f "go run ./cmd/api" 2>/dev/null || true
 	@pkill -f "go run ./cmd/worker" 2>/dev/null || true
-	@lsof -ti :8080 | xargs kill -9 2>/dev/null || true
+	@ps aux | grep -E "[g]o run ./cmd/api|[g]o run ./cmd/worker" | awk '{print $$2}' | xargs kill -9 2>/dev/null || true
 	@echo "✓ Stopped API and Worker"
 
 # Run frontend locally

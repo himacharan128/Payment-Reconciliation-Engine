@@ -8,12 +8,14 @@ export default function ManualMatchModal({ transaction, onClose, onSuccess }) {
   const [query, setQuery] = useState('');
   const [amount, setAmount] = useState(transaction.amount || '');
   const [status, setStatus] = useState('sent');
+  const [fromDate, setFromDate] = useState('');
+  const [toDate, setToDate] = useState('');
   const [invoices, setInvoices] = useState([]);
   const [loading, setLoading] = useState(false);
   const [matching, setMatching] = useState(false);
 
   useEffect(() => {
-    if (query.length >= 2 || amount) {
+    if (query.length >= 2 || amount || fromDate || toDate || status) {
       const timeoutId = setTimeout(() => {
         performSearch();
       }, 500);
@@ -21,10 +23,10 @@ export default function ManualMatchModal({ transaction, onClose, onSuccess }) {
     } else {
       setInvoices([]);
     }
-  }, [query, amount, status]);
+  }, [query, amount, status, fromDate, toDate]);
 
   const performSearch = async () => {
-    if (!query && !amount) return;
+    if (!query && !amount && !fromDate && !toDate && !status) return;
     
     setLoading(true);
     try {
@@ -32,6 +34,8 @@ export default function ManualMatchModal({ transaction, onClose, onSuccess }) {
       if (query) params.q = query;
       if (amount) params.amount = amount;
       if (status) params.status = status;
+      if (fromDate) params.fromDate = fromDate;
+      if (toDate) params.toDate = toDate;
       const data = await searchInvoices(params);
       setInvoices(data.items);
     } catch (error) {
@@ -99,6 +103,26 @@ export default function ManualMatchModal({ transaction, onClose, onSuccess }) {
               </select>
             </div>
           </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium mb-1">From Date</label>
+              <input
+                type="date"
+                value={fromDate}
+                onChange={(e) => setFromDate(e.target.value)}
+                className="w-full px-3 py-2 border rounded"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium mb-1">To Date</label>
+              <input
+                type="date"
+                value={toDate}
+                onChange={(e) => setToDate(e.target.value)}
+                className="w-full px-3 py-2 border rounded"
+              />
+            </div>
+          </div>
         </div>
 
         {loading ? (
@@ -107,7 +131,7 @@ export default function ManualMatchModal({ transaction, onClose, onSuccess }) {
           </div>
         ) : invoices.length === 0 ? (
           <p className="text-center text-gray-500 py-8">
-            {query.length < 2 && !amount ? 'Enter at least 2 characters or an amount' : 'No invoices found'}
+            {query.length < 2 && !amount && !fromDate && !toDate && !status ? 'Enter search criteria' : 'No invoices found'}
           </p>
         ) : (
           <div className="border rounded">

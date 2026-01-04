@@ -54,3 +54,40 @@ export const getStatusColor = (status) => {
   return colors[status] || 'gray';
 };
 
+// Convert transactions array to CSV format
+export const transactionsToCSV = (transactions) => {
+  if (transactions.length === 0) return '';
+  
+  // CSV header
+  const headers = ['ID', 'Transaction Date', 'Description', 'Amount', 'Reference Number', 'Status'];
+  const rows = [headers.join(',')];
+  
+  // CSV rows
+  transactions.forEach(txn => {
+    const row = [
+      txn.id || '',
+      txn.transactionDate || '',
+      `"${(txn.description || '').replace(/"/g, '""')}"`, // Escape quotes in description
+      txn.amount || '',
+      txn.referenceNumber || '',
+      txn.status || '',
+    ];
+    rows.push(row.join(','));
+  });
+  
+  return rows.join('\n');
+};
+
+// Download CSV file
+export const downloadCSV = (csvContent, filename) => {
+  const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+  const link = document.createElement('a');
+  const url = URL.createObjectURL(blob);
+  link.setAttribute('href', url);
+  link.setAttribute('download', filename);
+  link.style.visibility = 'hidden';
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+};
+

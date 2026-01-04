@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 )
 
@@ -284,25 +285,45 @@ func (w *Worker) failJob(job *Job, err error, duration time.Duration) {
 }
 
 // UpdateBatchProgress updates batch counters (called during CSV processing)
+// Uses direct query formatting to avoid prepared statement issues with Neon pooler
 func (w *Worker) UpdateBatchProgress(batchID string, processed, autoMatched, needsReview, unmatched int) error {
-	_, err := w.DB.Exec(`
+	// Validate batchID is a valid UUID to prevent SQL injection
+	if _, err := uuid.Parse(batchID); err != nil {
+		return fmt.Errorf("invalid batch ID: %w", err)
+	}
+	
+	// Format query directly to avoid prepared statements (safe since we validate UUID and use integers)
+	// Use underlying *sql.DB to avoid sqlx's prepared statement handling
+	query := fmt.Sprintf(`
 		UPDATE reconciliation_batches
-		SET processed_count = $1,
-		    auto_matched_count = $2,
-		    needs_review_count = $3,
-		    unmatched_count = $4
-		WHERE id = $5
+		SET processed_count = %d,
+		    auto_matched_count = %d,
+		    needs_review_count = %d,
+		    unmatched_count = %d
+		WHERE id = '%s'
 	`, processed, autoMatched, needsReview, unmatched, batchID)
+	
+	_, err := w.DB.DB.Exec(query)
 	return err
 }
 
 // SetBatchTotal sets total_transactions when processing completes
+// Uses direct query formatting to avoid prepared statement issues with Neon pooler
 func (w *Worker) SetBatchTotal(batchID string, total int) error {
-	_, err := w.DB.Exec(`
+	// Validate batchID is a valid UUID to prevent SQL injection
+	if _, err := uuid.Parse(batchID); err != nil {
+		return fmt.Errorf("invalid batch ID: %w", err)
+	}
+	
+	// Format query directly to avoid prepared statements (safe since we validate UUID and use integers)
+	// Use underlying *sql.DB to avoid sqlx's prepared statement handling
+	query := fmt.Sprintf(`
 		UPDATE reconciliation_batches
-		SET total_transactions = $1
-		WHERE id = $2
+		SET total_transactions = %d
+		WHERE id = '%s'
 	`, total, batchID)
+	
+	_, err := w.DB.DB.Exec(query)
 	return err
 }
 

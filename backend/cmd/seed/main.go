@@ -1,13 +1,13 @@
 package main
 
 import (
-	"database/sql"
 	"encoding/csv"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -132,9 +132,9 @@ func main() {
 
 	fmt.Printf("Parsed %d invoices from CSV\n", len(invoices))
 
-	// Batch insert with ON CONFLICT
+	// Batch insert with ON CONFLICT - optimized for Neon
 	startTime := time.Now()
-	batchSize := 200
+	batchSize := 100 // Smaller batches for Neon pooler
 	inserted := 0
 	skipped := 0
 
@@ -151,16 +151,19 @@ func main() {
 			log.Fatalf("Failed to begin transaction: %v", err)
 		}
 
-		// Build insert query with ON CONFLICT
+		// Build multi-row insert query with ON CONFLICT
+		// Using VALUES clause with multiple rows for better performance
 		query := `
 			INSERT INTO invoices (invoice_number, customer_name, customer_email, amount, status, due_date, paid_at, created_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-			ON CONFLICT (invoice_number) DO NOTHING
-			RETURNING invoice_number`
-
-		for _, inv := range batch {
-			var returnedNumber string
-			err := tx.QueryRow(query,
+			VALUES `
+		
+		args := make([]interface{}, 0, len(batch)*8)
+		placeholders := make([]string, 0, len(batch))
+		
+		for idx, inv := range batch {
+			placeholders = append(placeholders, fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)",
+				idx*8+1, idx*8+2, idx*8+3, idx*8+4, idx*8+5, idx*8+6, idx*8+7, idx*8+8))
+			args = append(args,
 				inv.InvoiceNumber,
 				inv.CustomerName,
 				inv.CustomerEmail,
@@ -169,21 +172,30 @@ func main() {
 				inv.DueDate,
 				inv.PaidAt,
 				inv.CreatedAt,
-			).Scan(&returnedNumber)
-
-			if err == nil {
-				inserted++
-			} else if err == sql.ErrNoRows {
-				// ON CONFLICT DO NOTHING returns no rows
-				skipped++
-			} else {
-				log.Printf("Error inserting invoice %s: %v", inv.InvoiceNumber, err)
-			}
+			)
 		}
+		
+		fullQuery := query + strings.Join(placeholders, ", ") + `
+			ON CONFLICT (invoice_number) DO NOTHING`
+
+		// Execute batch insert
+		result, err := tx.Exec(fullQuery, args...)
+		if err != nil {
+			tx.Rollback()
+			log.Fatalf("Failed to insert batch: %v", err)
+		}
+
+		rowsAffected, _ := result.RowsAffected()
+		inserted += int(rowsAffected)
+		skipped += len(batch) - int(rowsAffected)
 
 		// Commit transaction
 		if err := tx.Commit(); err != nil {
 			log.Fatalf("Failed to commit transaction: %v", err)
+		}
+		
+		if (i/batchSize+1)%5 == 0 {
+			fmt.Printf("Processed %d/%d invoices...\n", end, len(invoices))
 		}
 	}
 

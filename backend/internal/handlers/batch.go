@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"errors"
 	"net/http"
 	"time"
 
@@ -19,10 +20,19 @@ type BatchResponse struct {
 	ProcessedCount   int     `json:"processedCount"`
 	TotalTransactions *int    `json:"totalTransactions"`
 	Counts           struct {
-		AutoMatched  int `json:"autoMatched"`
-		NeedsReview  int `json:"needsReview"`
-		Unmatched    int `json:"unmatched"`
+		AutoMatched  int     `json:"autoMatched"`
+		NeedsReview  int     `json:"needsReview"`
+		Unmatched    int     `json:"unmatched"`
+		Confirmed    int     `json:"confirmed"`
+		External     int     `json:"external"`
 	} `json:"counts"`
+	Totals           struct {
+		AutoMatched  float64 `json:"autoMatched"`
+		NeedsReview  float64 `json:"needsReview"`
+		Unmatched    float64 `json:"unmatched"`
+		Confirmed    float64 `json:"confirmed"`
+		External     float64 `json:"external"`
+	} `json:"totals"`
 	StartedAt   string  `json:"startedAt"`
 	CompletedAt *string `json:"completedAt"`
 	UpdatedAt   string  `json:"updatedAt"`
@@ -45,20 +55,30 @@ func (h *BatchHandler) GetBatch(c echo.Context) error {
 		AutoMatchedCount  int            `db:"auto_matched_count"`
 		NeedsReviewCount  int            `db:"needs_review_count"`
 		UnmatchedCount    int            `db:"unmatched_count"`
+		ConfirmedCount   int            `db:"confirmed_count"`
+		ExternalCount     int            `db:"external_count"`
 		StartedAt         time.Time      `db:"started_at"`
 		CompletedAt       sql.NullTime   `db:"completed_at"`
 		CreatedAt        time.Time      `db:"created_at"`
 	}
 
+	// Validate batchID is a valid UUID format
+	if len(batchID) != 36 {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid batch id format"})
+	}
+
+	// Query batch - PostgreSQL will automatically convert string to UUID
 	err := h.DB.Get(&batch, `
 		SELECT 
-			id::text,
-			status::text,
+			id::text as id,
+			status::text as status,
 			processed_count,
 			total_transactions,
 			auto_matched_count,
 			needs_review_count,
 			unmatched_count,
+			confirmed_count,
+			external_count,
 			started_at,
 			completed_at,
 			created_at
@@ -66,10 +86,11 @@ func (h *BatchHandler) GetBatch(c echo.Context) error {
 		WHERE id = $1
 	`, batchID)
 
-	if err == sql.ErrNoRows {
-		return c.JSON(http.StatusNotFound, map[string]string{"error": "batch not found"})
-	}
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return c.JSON(http.StatusNotFound, map[string]string{"error": "batch not found"})
+		}
+		c.Logger().Errorf("Failed to fetch batch %s: %v", batchID, err)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to fetch batch"})
 	}
 
@@ -101,6 +122,44 @@ func (h *BatchHandler) GetBatch(c echo.Context) error {
 	response.Counts.AutoMatched = batch.AutoMatchedCount
 	response.Counts.NeedsReview = batch.NeedsReviewCount
 	response.Counts.Unmatched = batch.UnmatchedCount
+	response.Counts.Confirmed = batch.ConfirmedCount
+	response.Counts.External = batch.ExternalCount
+
+	// Calculate dollar totals by status
+	var totals struct {
+		AutoMatched  sql.NullFloat64 `db:"auto_matched_total"`
+		NeedsReview  sql.NullFloat64 `db:"needs_review_total"`
+		Unmatched    sql.NullFloat64 `db:"unmatched_total"`
+		Confirmed    sql.NullFloat64 `db:"confirmed_total"`
+		External     sql.NullFloat64 `db:"external_total"`
+	}
+	
+	err = h.DB.Get(&totals, `
+		SELECT 
+			COALESCE(SUM(CASE WHEN status = 'auto_matched' THEN amount ELSE 0 END), 0) as auto_matched_total,
+			COALESCE(SUM(CASE WHEN status = 'needs_review' THEN amount ELSE 0 END), 0) as needs_review_total,
+			COALESCE(SUM(CASE WHEN status = 'unmatched' THEN amount ELSE 0 END), 0) as unmatched_total,
+			COALESCE(SUM(CASE WHEN status = 'confirmed' THEN amount ELSE 0 END), 0) as confirmed_total,
+			COALESCE(SUM(CASE WHEN status = 'external' THEN amount ELSE 0 END), 0) as external_total
+		FROM bank_transactions
+		WHERE upload_batch_id = $1
+	`, batchID)
+	
+	if err != nil {
+		c.Logger().Warnf("Failed to fetch dollar totals: %v", err)
+		// Continue with zero totals if query fails
+		response.Totals.AutoMatched = 0
+		response.Totals.NeedsReview = 0
+		response.Totals.Unmatched = 0
+		response.Totals.Confirmed = 0
+		response.Totals.External = 0
+	} else {
+		response.Totals.AutoMatched = totals.AutoMatched.Float64
+		response.Totals.NeedsReview = totals.NeedsReview.Float64
+		response.Totals.Unmatched = totals.Unmatched.Float64
+		response.Totals.Confirmed = totals.Confirmed.Float64
+		response.Totals.External = totals.External.Float64
+	}
 
 	// Set completed at (nullable)
 	if batch.CompletedAt.Valid {

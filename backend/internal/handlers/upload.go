@@ -107,8 +107,13 @@ func (h *UploadHandler) Upload(c echo.Context) error {
 	}
 
 	// Stream write file to disk
+	// Use absolute path to ensure worker can find the file
 	filePath := filepath.Join(h.UploadDir, batchID+".csv")
-	dst, err := os.Create(filePath)
+	absFilePath, err := filepath.Abs(filePath)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to resolve file path"})
+	}
+	dst, err := os.Create(absFilePath)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create file"})
 	}
@@ -116,20 +121,20 @@ func (h *UploadHandler) Upload(c echo.Context) error {
 	bytesWritten, err := io.Copy(dst, src)
 	if err != nil {
 		dst.Close()
-		os.Remove(filePath)
+		os.Remove(absFilePath)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to write file"})
 	}
 	dst.Close()
 
 	if bytesWritten == 0 {
-		os.Remove(filePath)
+		os.Remove(absFilePath)
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "file is empty"})
 	}
 
 	// Create batch and job in transaction
 	tx, err := h.DB.Beginx()
 	if err != nil {
-		os.Remove(filePath)
+		os.Remove(absFilePath)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to begin transaction"})
 	}
 
@@ -140,24 +145,24 @@ func (h *UploadHandler) Upload(c echo.Context) error {
 	`, batchID, file.Filename, "processing", 0, 0, 0, 0)
 	if err != nil {
 		tx.Rollback()
-		os.Remove(filePath)
+		os.Remove(absFilePath)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create batch"})
 	}
 
-	// Insert job
+	// Insert job with absolute file path
 	_, err = tx.Exec(`
 		INSERT INTO reconciliation_jobs (batch_id, file_path, status, attempts)
 		VALUES ($1, $2, $3, $4)
-	`, batchID, filePath, "queued", 0)
+	`, batchID, absFilePath, "queued", 0)
 	if err != nil {
 		tx.Rollback()
-		os.Remove(filePath)
+		os.Remove(absFilePath)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create job"})
 	}
 
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
-		os.Remove(filePath)
+		os.Remove(absFilePath)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to commit transaction"})
 	}
 

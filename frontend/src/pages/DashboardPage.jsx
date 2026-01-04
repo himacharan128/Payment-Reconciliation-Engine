@@ -1,11 +1,11 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { getBatch, listTransactions, bulkConfirm, confirmTransaction, rejectTransaction, markExternal } from '../lib/api';
+import { getBatch, listTransactions, bulkConfirm, confirmTransaction, rejectTransaction, markExternal, exportUnmatched } from '../lib/api';
 import { toast } from '../components/Toast';
 import LoadingSpinner from '../components/LoadingSpinner';
 import StatusBadge from '../components/StatusBadge';
 import EmptyState from '../components/EmptyState';
-import { formatMoney, formatDate } from '../lib/utils';
+import { formatMoney, formatDate, transactionsToCSV, downloadCSV } from '../lib/utils';
 import ManualMatchModal from '../components/ManualMatchModal';
 
 const TABS = [
@@ -29,6 +29,7 @@ export default function DashboardPage() {
   const [showManualMatch, setShowManualMatch] = useState(false);
   const [sortColumn, setSortColumn] = useState(null);
   const [sortDirection, setSortDirection] = useState('asc'); // 'asc' or 'desc'
+  const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
     loadBatch();
@@ -100,6 +101,34 @@ export default function DashboardPage() {
     }
   };
 
+  const handleExportUnmatched = async () => {
+    if (batch.counts.unmatched === 0) {
+      toast.error('No unmatched transactions to export');
+      return;
+    }
+    
+    setExporting(true);
+    try {
+      toast.info('Exporting unmatched transactions...');
+      const unmatchedTransactions = await exportUnmatched(batchId);
+      
+      if (unmatchedTransactions.length === 0) {
+        toast.error('No unmatched transactions found');
+        return;
+      }
+      
+      const csvContent = transactionsToCSV(unmatchedTransactions);
+      const filename = `unmatched-transactions-${batchId.substring(0, 8)}-${new Date().toISOString().split('T')[0]}.csv`;
+      downloadCSV(csvContent, filename);
+      
+      toast.success(`Exported ${unmatchedTransactions.length} unmatched transactions`);
+    } catch (error) {
+      toast.error(error.message || 'Export failed');
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const handleAction = async (action, transactionId) => {
     try {
       switch (action) {
@@ -122,7 +151,11 @@ export default function DashboardPage() {
           ? { ...t, status: action === 'confirm' ? 'confirmed' : action === 'reject' ? 'unmatched' : 'external' }
           : t
       ));
-      await loadBatch();
+      // Refresh batch counters and transaction list to ensure accurate counts
+      await Promise.all([
+        loadBatch(),
+        loadTransactions() // Refresh transactions to update "Confirmed" count accurately
+      ]);
     } catch (error) {
       toast.error(error.message || 'Action failed');
     }
@@ -212,31 +245,42 @@ export default function DashboardPage() {
         <div className="bg-white p-4 rounded shadow">
           <p className="text-sm text-gray-600">Auto-Matched</p>
           <p className="text-2xl font-bold">{batch.counts.autoMatched}</p>
+          <p className="text-sm text-gray-500 mt-1">{formatMoney(batch.totals?.autoMatched || 0)}</p>
         </div>
         <div className="bg-white p-4 rounded shadow">
           <p className="text-sm text-gray-600">Needs Review</p>
           <p className="text-2xl font-bold">{batch.counts.needsReview}</p>
+          <p className="text-sm text-gray-500 mt-1">{formatMoney(batch.totals?.needsReview || 0)}</p>
         </div>
         <div className="bg-white p-4 rounded shadow">
           <p className="text-sm text-gray-600">Unmatched</p>
           <p className="text-2xl font-bold">{batch.counts.unmatched}</p>
+          <p className="text-sm text-gray-500 mt-1">{formatMoney(batch.totals?.unmatched || 0)}</p>
         </div>
         <div className="bg-white p-4 rounded shadow">
           <p className="text-sm text-gray-600">Confirmed</p>
-          <p className="text-2xl font-bold">
-            {transactions.filter(t => t.status === 'confirmed').length}
-          </p>
+          <p className="text-2xl font-bold">{batch.counts.confirmed || 0}</p>
+          <p className="text-sm text-gray-500 mt-1">{formatMoney(batch.totals?.confirmed || 0)}</p>
         </div>
       </div>
 
       {/* Bulk Actions */}
-      <div className="mb-4">
+      <div className="mb-4 flex gap-2">
         {batch.counts.autoMatched > 0 && (
           <button
             onClick={handleBulkConfirm}
-            className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 mr-2"
+            className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 transition-colors"
           >
             Confirm All Auto-Matched
+          </button>
+        )}
+        {batch.counts.unmatched > 0 && (
+          <button
+            onClick={handleExportUnmatched}
+            disabled={exporting}
+            className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {exporting ? 'Exporting...' : 'Export Unmatched'}
           </button>
         )}
       </div>

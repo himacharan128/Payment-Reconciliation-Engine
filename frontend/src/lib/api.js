@@ -106,14 +106,37 @@ export const bulkConfirm = async (batchId, notes = '') => {
 };
 
 // Invoice Search
-export const searchInvoices = async ({ q, amount, status, limit = 20 } = {}) => {
+export const searchInvoices = async ({ q, amount, status, fromDate, toDate, limit = 20 } = {}) => {
   try {
     const params = { limit };
     if (q) params.q = q;
     if (amount) params.amount = amount;
     if (status) params.status = status;
+    if (fromDate) params.fromDate = fromDate;
+    if (toDate) params.toDate = toDate;
     const response = await api.get('/api/invoices/search', { params });
     return response.data;
+  } catch (error) {
+    throw handleError(error);
+  }
+};
+
+// Export Unmatched - fetches all unmatched transactions
+export const exportUnmatched = async (batchId) => {
+  try {
+    const allTransactions = [];
+    let cursor = null;
+    
+    // Fetch all unmatched transactions using pagination
+    do {
+      const params = { status: 'unmatched', limit: 100 };
+      if (cursor) params.cursor = cursor;
+      const response = await api.get(`/api/reconciliation/${batchId}/transactions`, { params });
+      allTransactions.push(...response.data.items);
+      cursor = response.data.nextCursor;
+    } while (cursor);
+    
+    return allTransactions;
   } catch (error) {
     throw handleError(error);
   }

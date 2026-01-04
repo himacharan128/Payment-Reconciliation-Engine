@@ -42,12 +42,14 @@ func (h *InvoicesHandler) SearchInvoices(c echo.Context) error {
 	q := strings.TrimSpace(c.QueryParam("q"))
 	amountStr := strings.TrimSpace(c.QueryParam("amount"))
 	status := strings.TrimSpace(c.QueryParam("status"))
+	fromDateStr := strings.TrimSpace(c.QueryParam("fromDate"))
+	toDateStr := strings.TrimSpace(c.QueryParam("toDate"))
 	limitStr := c.QueryParam("limit")
 
 	// Validate: require at least one filter
-	if q == "" && amountStr == "" && status == "" {
+	if q == "" && amountStr == "" && status == "" && fromDateStr == "" && toDateStr == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{
-			"error": "at least one filter required (q, amount, or status)",
+			"error": "at least one filter required (q, amount, status, fromDate, or toDate)",
 		})
 	}
 
@@ -92,8 +94,30 @@ func (h *InvoicesHandler) SearchInvoices(c echo.Context) error {
 		amount = &parsedAmount
 	}
 
+	// Parse date range if provided
+	var fromDate, toDate *time.Time
+	if fromDateStr != "" {
+		parsedDate, err := time.Parse("2006-01-02", fromDateStr)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid fromDate format (expected YYYY-MM-DD)"})
+		}
+		fromDate = &parsedDate
+	}
+	if toDateStr != "" {
+		parsedDate, err := time.Parse("2006-01-02", toDateStr)
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, map[string]string{"error": "invalid toDate format (expected YYYY-MM-DD)"})
+		}
+		toDate = &parsedDate
+	}
+
+	// Validate date range
+	if fromDate != nil && toDate != nil && fromDate.After(*toDate) {
+		return c.JSON(http.StatusBadRequest, map[string]string{"error": "fromDate must be before or equal to toDate"})
+	}
+
 	// Build query
-	query, args := h.buildSearchQuery(q, amount, status, limit)
+	query, args := h.buildSearchQuery(q, amount, status, fromDate, toDate, limit)
 	
 	// Execute query
 	type dbRow struct {
@@ -133,8 +157,8 @@ func (h *InvoicesHandler) SearchInvoices(c echo.Context) error {
 	}
 
 	duration := time.Since(startTime)
-	log.Printf("Invoice search: q=%q, amount=%v, status=%q, limit=%d, results=%d, duration=%v",
-		q, amount, status, limit, len(items), duration)
+	log.Printf("Invoice search: q=%q, amount=%v, status=%q, fromDate=%v, toDate=%v, limit=%d, results=%d, duration=%v",
+		q, amount, status, fromDate, toDate, limit, len(items), duration)
 
 	response := InvoicesSearchResponse{
 		Items: items,
@@ -146,7 +170,7 @@ func (h *InvoicesHandler) SearchInvoices(c echo.Context) error {
 	return c.JSON(http.StatusOK, response)
 }
 
-func (h *InvoicesHandler) buildSearchQuery(q string, amount *float64, status string, limit int) (string, []interface{}) {
+func (h *InvoicesHandler) buildSearchQuery(q string, amount *float64, status string, fromDate, toDate *time.Time, limit int) (string, []interface{}) {
 	query := `
 		SELECT 
 			id::text,
@@ -173,6 +197,19 @@ func (h *InvoicesHandler) buildSearchQuery(q string, amount *float64, status str
 	if status != "" {
 		query += ` AND status = $` + strconv.Itoa(argNum)
 		args = append(args, status)
+		argNum++
+	}
+
+	// Date range filters
+	if fromDate != nil {
+		query += ` AND due_date >= $` + strconv.Itoa(argNum)
+		args = append(args, *fromDate)
+		argNum++
+	}
+
+	if toDate != nil {
+		query += ` AND due_date <= $` + strconv.Itoa(argNum)
+		args = append(args, *toDate)
 		argNum++
 	}
 

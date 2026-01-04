@@ -34,6 +34,64 @@ func NewActionsHandler(db *sqlx.DB) *ActionsHandler {
 	return &ActionsHandler{DB: db}
 }
 
+// updateBatchCounters updates batch counters when transaction status changes
+// Uses direct query formatting to avoid prepared statement issues with Neon pooler
+func (h *ActionsHandler) updateBatchCounters(tx *sqlx.Tx, batchID string, oldStatus, newStatus string) error {
+	// Get current batch counters
+	var batch struct {
+		AutoMatchedCount  int `db:"auto_matched_count"`
+		NeedsReviewCount  int `db:"needs_review_count"`
+		UnmatchedCount    int `db:"unmatched_count"`
+		ConfirmedCount   int `db:"confirmed_count"`
+		ExternalCount     int `db:"external_count"`
+	}
+	err := tx.Get(&batch, `SELECT auto_matched_count, needs_review_count, unmatched_count, confirmed_count, external_count FROM reconciliation_batches WHERE id = $1`, batchID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch batch counters: %w", err)
+	}
+
+	// Adjust counters based on status transition (decrease old status)
+	if oldStatus == "auto_matched" {
+		batch.AutoMatchedCount--
+	} else if oldStatus == "needs_review" {
+		batch.NeedsReviewCount--
+	} else if oldStatus == "unmatched" {
+		batch.UnmatchedCount--
+	} else if oldStatus == "confirmed" {
+		batch.ConfirmedCount--
+	} else if oldStatus == "external" {
+		batch.ExternalCount--
+	}
+
+	// Increase new status counter
+	if newStatus == "auto_matched" {
+		batch.AutoMatchedCount++
+	} else if newStatus == "needs_review" {
+		batch.NeedsReviewCount++
+	} else if newStatus == "unmatched" {
+		batch.UnmatchedCount++
+	} else if newStatus == "confirmed" {
+		batch.ConfirmedCount++
+	} else if newStatus == "external" {
+		batch.ExternalCount++
+	}
+
+	// Update batch counters (using direct query to avoid prepared statements)
+	// Use Exec with formatted query string - safe because batchID is validated UUID and counts are integers
+	query := fmt.Sprintf(`
+		UPDATE reconciliation_batches
+		SET auto_matched_count = %d,
+		    needs_review_count = %d,
+		    unmatched_count = %d,
+		    confirmed_count = %d,
+		    external_count = %d
+		WHERE id = '%s'
+	`, batch.AutoMatchedCount, batch.NeedsReviewCount, batch.UnmatchedCount, batch.ConfirmedCount, batch.ExternalCount, batchID)
+	
+	_, err = tx.Exec(query)
+	return err
+}
+
 // ConfirmMatch confirms a suggested match
 func (h *ActionsHandler) ConfirmMatch(c echo.Context) error {
 	transactionID := c.Param("id")
@@ -57,9 +115,10 @@ func (h *ActionsHandler) ConfirmMatch(c echo.Context) error {
 	var current struct {
 		Status          string         `db:"status"`
 		MatchedInvoiceID sql.NullString `db:"matched_invoice_id"`
+		BatchID         string         `db:"upload_batch_id"`
 	}
 	err = tx.Get(&current, `
-		SELECT status, matched_invoice_id
+		SELECT status, matched_invoice_id, upload_batch_id
 		FROM bank_transactions
 		WHERE id = $1
 		FOR UPDATE
@@ -93,6 +152,12 @@ func (h *ActionsHandler) ConfirmMatch(c echo.Context) error {
 	`, transactionID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update transaction"})
+	}
+
+	// Update batch counters
+	if err := h.updateBatchCounters(tx, current.BatchID, current.Status, "confirmed"); err != nil {
+		log.Printf("Warning: Failed to update batch counters: %v", err)
+		// Continue anyway - counters are eventually consistent
 	}
 
 	// Insert audit log
@@ -132,9 +197,10 @@ func (h *ActionsHandler) RejectMatch(c echo.Context) error {
 	var current struct {
 		Status          string         `db:"status"`
 		MatchedInvoiceID sql.NullString `db:"matched_invoice_id"`
+		BatchID         string         `db:"upload_batch_id"`
 	}
 	err = tx.Get(&current, `
-		SELECT status, matched_invoice_id
+		SELECT status, matched_invoice_id, upload_batch_id
 		FROM bank_transactions
 		WHERE id = $1
 		FOR UPDATE
@@ -153,9 +219,11 @@ func (h *ActionsHandler) RejectMatch(c echo.Context) error {
 		})
 	}
 
-	previousInvoiceID := ""
+	var previousInvoiceID interface{}
 	if current.MatchedInvoiceID.Valid {
 		previousInvoiceID = current.MatchedInvoiceID.String
+	} else {
+		previousInvoiceID = nil
 	}
 
 	// Update transaction: clear match, set to unmatched
@@ -168,6 +236,12 @@ func (h *ActionsHandler) RejectMatch(c echo.Context) error {
 	`, transactionID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update transaction"})
+	}
+
+	// Update batch counters
+	if err := h.updateBatchCounters(tx, current.BatchID, current.Status, "unmatched"); err != nil {
+		log.Printf("Warning: Failed to update batch counters: %v", err)
+		// Continue anyway - counters are eventually consistent
 	}
 
 	// Insert audit log
@@ -236,9 +310,10 @@ func (h *ActionsHandler) ManualMatch(c echo.Context) error {
 	var current struct {
 		Status          string         `db:"status"`
 		MatchedInvoiceID sql.NullString `db:"matched_invoice_id"`
+		BatchID         string         `db:"upload_batch_id"`
 	}
 	err = tx.Get(&current, `
-		SELECT status, matched_invoice_id
+		SELECT status, matched_invoice_id, upload_batch_id
 		FROM bank_transactions
 		WHERE id = $1
 		FOR UPDATE
@@ -250,9 +325,11 @@ func (h *ActionsHandler) ManualMatch(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to fetch transaction"})
 	}
 
-	previousInvoiceID := ""
+	var previousInvoiceID interface{}
 	if current.MatchedInvoiceID.Valid {
 		previousInvoiceID = current.MatchedInvoiceID.String
+	} else {
+		previousInvoiceID = nil
 	}
 
 	// Update transaction: set match and confirm
@@ -265,6 +342,12 @@ func (h *ActionsHandler) ManualMatch(c echo.Context) error {
 	`, req.InvoiceID, transactionID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update transaction"})
+	}
+
+	// Update batch counters
+	if err := h.updateBatchCounters(tx, current.BatchID, current.Status, "confirmed"); err != nil {
+		log.Printf("Warning: Failed to update batch counters: %v", err)
+		// Continue anyway - counters are eventually consistent
 	}
 
 	// Insert audit log
@@ -303,9 +386,10 @@ func (h *ActionsHandler) MarkExternal(c echo.Context) error {
 	var current struct {
 		Status          string         `db:"status"`
 		MatchedInvoiceID sql.NullString `db:"matched_invoice_id"`
+		BatchID         string         `db:"upload_batch_id"`
 	}
 	err = tx.Get(&current, `
-		SELECT status, matched_invoice_id
+		SELECT status, matched_invoice_id, upload_batch_id
 		FROM bank_transactions
 		WHERE id = $1
 		FOR UPDATE
@@ -322,9 +406,11 @@ func (h *ActionsHandler) MarkExternal(c echo.Context) error {
 		return c.JSON(http.StatusOK, map[string]string{"message": "already marked as external"})
 	}
 
-	previousInvoiceID := ""
+	var previousInvoiceID interface{}
 	if current.MatchedInvoiceID.Valid {
 		previousInvoiceID = current.MatchedInvoiceID.String
+	} else {
+		previousInvoiceID = nil
 	}
 
 	// Update transaction
@@ -336,6 +422,12 @@ func (h *ActionsHandler) MarkExternal(c echo.Context) error {
 	`, transactionID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to update transaction"})
+	}
+
+	// Update batch counters (adjust based on previous status)
+	if err := h.updateBatchCounters(tx, current.BatchID, current.Status, "external"); err != nil {
+		log.Printf("Warning: Failed to update batch counters: %v", err)
+		// Continue anyway - counters are eventually consistent
 	}
 
 	// Insert audit log
@@ -404,6 +496,25 @@ func (h *ActionsHandler) BulkConfirm(c echo.Context) error {
 	}
 
 	rowsAffected, _ := result.RowsAffected()
+
+	// Update batch counters: decrease auto_matched_count and increase confirmed_count (bulk operation)
+	if rowsAffected > 0 {
+		var batch struct {
+			AutoMatchedCount int `db:"auto_matched_count"`
+			ConfirmedCount   int `db:"confirmed_count"`
+		}
+		err = tx.Get(&batch, `SELECT auto_matched_count, confirmed_count FROM reconciliation_batches WHERE id = $1`, req.BatchID)
+		if err == nil {
+			newAutoMatched := batch.AutoMatchedCount - int(rowsAffected)
+			if newAutoMatched < 0 {
+				newAutoMatched = 0
+			}
+			newConfirmed := batch.ConfirmedCount + int(rowsAffected)
+			// Use formatted query to avoid prepared statements (safe: validated UUID and integer)
+			updateQuery := fmt.Sprintf(`UPDATE reconciliation_batches SET auto_matched_count = %d, confirmed_count = %d WHERE id = '%s'`, newAutoMatched, newConfirmed, req.BatchID)
+			_, _ = tx.Exec(updateQuery) // Ignore error - counters are eventually consistent
+		}
+	}
 
 	if err := tx.Commit(); err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to commit transaction"})

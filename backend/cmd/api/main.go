@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/labstack/echo/v4"
@@ -40,9 +41,14 @@ func main() {
 	// CORS middleware - allow all origins
 	corsOrigins := os.Getenv("CORS_ALLOWED_ORIGINS")
 	if corsOrigins != "" {
+		// Split comma-separated origins
+		origins := []string{}
+		for _, origin := range strings.Split(corsOrigins, ",") {
+			origins = append(origins, strings.TrimSpace(origin))
+		}
 		// Use specific origins if provided
 		e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-			AllowOrigins: []string{corsOrigins},
+			AllowOrigins: origins,
 			AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
 			AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept},
 		}))
