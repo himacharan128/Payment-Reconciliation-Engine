@@ -1,0 +1,23 @@
+# env
+.env
+.env.local
+.env.*.local
+# Production env files (may contain real URLs - don't commit)
+frontend/.env.production
+
+# uploads and volumes
+data/uploads/*
+!data/uploads/.gitkeep
+*.log
+
+# Go
+backend/bin/
+backend/tmp/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# OS
+.DS_Store
+

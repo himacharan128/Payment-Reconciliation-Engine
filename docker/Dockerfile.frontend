@@ -1,0 +1,5 @@
+# placeholder - will be filled in Step 3
+FROM alpine:3.20
+WORKDIR /app
+CMD ["sh", "-c", "echo 'Frontend Dockerfile placeholder. Implement in Step 3.' && sleep 3600"]
+
