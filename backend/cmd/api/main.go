@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 
 	"github.com/labstack/echo/v4"
@@ -25,7 +24,12 @@ func main() {
 	// Get upload directory
 	uploadDir := os.Getenv("UPLOAD_DIR")
 	if uploadDir == "" {
-		uploadDir = "./data/uploads"
+		// Default to /tmp/uploads for production, ./data/uploads for local
+		if os.Getenv("APP_ENV") == "production" || os.Getenv("RENDER") == "true" {
+			uploadDir = "/tmp/uploads"
+		} else {
+			uploadDir = "./data/uploads"
+		}
 	}
 
 	// Ensure upload directory exists
@@ -38,30 +42,15 @@ func main() {
 	e.Use(middleware.Logger())
 	e.Use(middleware.Recover())
 
-	// CORS middleware - allow all origins
-	corsOrigins := os.Getenv("CORS_ALLOWED_ORIGINS")
-	if corsOrigins != "" {
-		// Split comma-separated origins
-		origins := []string{}
-		for _, origin := range strings.Split(corsOrigins, ",") {
-			origins = append(origins, strings.TrimSpace(origin))
-		}
-		// Use specific origins if provided
-		e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-			AllowOrigins: origins,
-			AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
-			AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept},
-		}))
-	} else {
-		// Allow all origins if not specified
-		e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
-			AllowOriginFunc: func(origin string) (bool, error) {
-				return true, nil // Allow all origins
-			},
-			AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
-			AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept},
-		}))
-	}
+	// CORS middleware - allow all origins (no restrictions)
+	e.Use(middleware.CORSWithConfig(middleware.CORSConfig{
+		AllowOriginFunc: func(origin string) (bool, error) {
+			return true, nil // Allow all origins - no restrictions
+		},
+		AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
+		AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization},
+		AllowCredentials: true,
+	}))
 
 	// Health check
 	e.GET("/health", func(c echo.Context) error {

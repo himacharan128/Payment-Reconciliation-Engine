@@ -1,19 +1,9 @@
--- Add confirmed_count and external_count to reconciliation_batches
-ALTER TABLE reconciliation_batches 
-ADD COLUMN confirmed_count INTEGER DEFAULT 0,
-ADD COLUMN external_count INTEGER DEFAULT 0;
+-- Add confirmed_count and external_count columns to reconciliation_batches
+ALTER TABLE reconciliation_batches
+ADD COLUMN IF NOT EXISTS confirmed_count INTEGER DEFAULT 0,
+ADD COLUMN IF NOT EXISTS external_count INTEGER DEFAULT 0;
 
--- Initialize counts from existing transactions
-UPDATE reconciliation_batches rb
-SET 
-    confirmed_count = (
-        SELECT COUNT(*) 
-        FROM bank_transactions 
-        WHERE upload_batch_id = rb.id AND status = 'confirmed'
-    ),
-    external_count = (
-        SELECT COUNT(*) 
-        FROM bank_transactions 
-        WHERE upload_batch_id = rb.id AND status = 'external'
-    );
-
+-- Update existing rows to have 0 for these counts
+UPDATE reconciliation_batches
+SET confirmed_count = 0, external_count = 0
+WHERE confirmed_count IS NULL OR external_count IS NULL;

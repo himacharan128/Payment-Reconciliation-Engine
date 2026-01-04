@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -91,50 +90,29 @@ func (h *UploadHandler) Upload(c echo.Context) error {
 		})
 	}
 
-	// Reopen file for streaming write
+	// Reopen file to read content
 	src, err = file.Open()
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to reopen file"})
 	}
 	defer src.Close()
 
-	// Generate batch ID
-	batchID := uuid.New().String()
-
-	// Ensure upload directory exists
-	if err := os.MkdirAll(h.UploadDir, 0755); err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create upload directory"})
-	}
-
-	// Stream write file to disk
-	// Use absolute path to ensure worker can find the file
-	filePath := filepath.Join(h.UploadDir, batchID+".csv")
-	absFilePath, err := filepath.Abs(filePath)
+	// Read entire file content into memory (for database storage)
+	fileContent, err := io.ReadAll(src)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to resolve file path"})
-	}
-	dst, err := os.Create(absFilePath)
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create file"})
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to read file"})
 	}
 
-	bytesWritten, err := io.Copy(dst, src)
-	if err != nil {
-		dst.Close()
-		os.Remove(absFilePath)
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to write file"})
-	}
-	dst.Close()
-
-	if bytesWritten == 0 {
-		os.Remove(absFilePath)
+	if len(fileContent) == 0 {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "file is empty"})
 	}
+
+	// Generate batch ID
+	batchID := uuid.New().String()
 
 	// Create batch and job in transaction
 	tx, err := h.DB.Beginx()
 	if err != nil {
-		os.Remove(absFilePath)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to begin transaction"})
 	}
 
@@ -145,24 +123,23 @@ func (h *UploadHandler) Upload(c echo.Context) error {
 	`, batchID, file.Filename, "processing", 0, 0, 0, 0)
 	if err != nil {
 		tx.Rollback()
-		os.Remove(absFilePath)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create batch"})
 	}
 
-	// Insert job with absolute file path
+	// Insert job with file content stored in database (for Render multi-instance compatibility)
+	// file_path is kept for compatibility but file_content is the source of truth
+	filePath := filepath.Join(h.UploadDir, batchID+".csv")
 	_, err = tx.Exec(`
-		INSERT INTO reconciliation_jobs (batch_id, file_path, status, attempts)
-		VALUES ($1, $2, $3, $4)
-	`, batchID, absFilePath, "queued", 0)
+		INSERT INTO reconciliation_jobs (batch_id, file_path, file_content, status, attempts)
+		VALUES ($1, $2, $3, $4, $5)
+	`, batchID, filePath, fileContent, "queued", 0)
 	if err != nil {
 		tx.Rollback()
-		os.Remove(absFilePath)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to create job"})
 	}
 
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
-		os.Remove(absFilePath)
 		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "failed to commit transaction"})
 	}
 

@@ -13,14 +13,15 @@ import (
 )
 
 type Job struct {
-	ID        string    `db:"id"`
-	BatchID   string    `db:"batch_id"`
-	FilePath  string    `db:"file_path"`
-	Status    string    `db:"status"`
-	Attempts  int       `db:"attempts"`
-	LastError *string   `db:"last_error"`
-	CreatedAt time.Time `db:"created_at"`
-	UpdatedAt time.Time `db:"updated_at"`
+	ID          string    `db:"id"`
+	BatchID     string    `db:"batch_id"`
+	FilePath    string    `db:"file_path"`
+	FileContent []byte    `db:"file_content"`
+	Status      string    `db:"status"`
+	Attempts    int       `db:"attempts"`
+	LastError   *string   `db:"last_error"`
+	CreatedAt   time.Time `db:"created_at"`
+	UpdatedAt   time.Time `db:"updated_at"`
 }
 
 type Worker struct {
@@ -112,7 +113,7 @@ func (w *Worker) claimJob() (*Job, error) {
 
 	// Find and lock a queued job (or stale processing job)
 	query := `
-		SELECT id, batch_id, file_path, status, attempts, last_error, created_at, updated_at
+		SELECT id, batch_id, file_path, file_content, status, attempts, last_error, created_at, updated_at
 		FROM reconciliation_jobs
 		WHERE status = 'queued'
 		   OR (status = 'processing' AND updated_at < NOW() - $1::interval)

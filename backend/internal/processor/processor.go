@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -34,7 +33,12 @@ type TransactionRow struct {
 
 func ProcessJob(job *worker.Job, db *sqlx.DB, w *worker.Worker) error {
 	startTime := time.Now()
-	log.Printf("Starting CSV processing: batch_id=%s, file_path=%s", job.BatchID, job.FilePath)
+	log.Printf("Starting CSV processing: batch_id=%s", job.BatchID)
+
+	// Check if file content is available in database (preferred for Render multi-instance)
+	if len(job.FileContent) == 0 {
+		return fmt.Errorf("file content not found in database for batch %s", job.BatchID)
+	}
 
 	// Load invoice cache
 	cacheStart := time.Now()
@@ -55,8 +59,8 @@ func ProcessJob(job *worker.Job, db *sqlx.DB, w *worker.Worker) error {
 		MatchedInvoices: make(map[string]bool),
 	}
 
-	// Process CSV
-	err = processor.processCSV(job.FilePath)
+	// Process CSV from database content
+	err = processor.processCSVFromContent(job.FileContent)
 	if err != nil {
 		return fmt.Errorf("CSV processing failed: %w", err)
 	}
@@ -66,14 +70,8 @@ func ProcessJob(job *worker.Job, db *sqlx.DB, w *worker.Worker) error {
 	return nil
 }
 
-func (p *Processor) processCSV(filePath string) error {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return fmt.Errorf("failed to open file: %w", err)
-	}
-	defer file.Close()
-
-	reader := csv.NewReader(file)
+func (p *Processor) processCSVFromContent(fileContent []byte) error {
+	reader := csv.NewReader(strings.NewReader(string(fileContent)))
 	
 	// Read header
 	header, err := reader.Read()
