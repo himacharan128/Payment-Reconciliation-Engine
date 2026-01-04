@@ -3,7 +3,7 @@
 This guide covers deploying the Payment Reconciliation Engine to production:
 - **Backend (API + Worker)**: Render
 - **Frontend**: Vercel
-- **Database**: PostgreSQL (Render, Supabase, or Neon)
+- **Database**: PostgreSQL (Neon)
 
 ## Folder Structure for Deployment
 
@@ -28,22 +28,10 @@ payment-reconciliation-engine/
 
 ## Database Hosting Options
 
-### Option 1: Render PostgreSQL (Recommended for Render backend)
+Render PostgreSQL
 - **Pros**: Same platform, easy connection, automatic backups
 - **Cons**: Slightly more expensive
 - **Setup**: Create PostgreSQL service in Render dashboard
-
-### Option 2: Supabase (Free tier available)
-- **Pros**: Free tier, great developer experience, built-in migrations tool
-- **Cons**: Different platform
-- **Setup**: Create project → Get connection string → Use in Render
-
-### Option 3: Neon (Serverless Postgres)
-- **Pros**: Serverless, auto-scaling, free tier
-- **Cons**: Newer platform
-- **Setup**: Create project → Get connection string
-
-**Recommendation**: Use **Render PostgreSQL** if deploying backend on Render (simplest setup).
 
 ---
 
@@ -58,6 +46,7 @@ payment-reconciliation-engine/
    - **Name**: `payment-reconciliation-api`
    - **Root Directory**: `backend` ⚠️ **Important!**
    - **Environment**: `Go`
+   - **Go Version**: `1.21` (or leave default - Render will auto-detect from go.mod)
    - **Build Command**: `go build -o api ./cmd/api`
    - **Start Command**: `./api`
    - **Port**: `8080` (or set `PORT` env var)
@@ -69,6 +58,7 @@ payment-reconciliation-engine/
    - **Name**: `payment-reconciliation-worker`
    - **Root Directory**: `backend` ⚠️ **Important!**
    - **Environment**: `Go`
+   - **Go Version**: `1.21` (or leave default - Render will auto-detect from go.mod)
    - **Build Command**: `go build -o worker ./cmd/worker`
    - **Start Command**: `./worker`
 
@@ -198,6 +188,13 @@ Click **Deploy** - Vercel will:
 ---
 
 ## Troubleshooting
+
+### "go.mod requires go >= X.X.X (running go X.X.X)"
+- **Cause**: Go version mismatch between go.mod and Render's default
+- **Fix**: 
+  1. Update `go.mod` to use a supported version (e.g., `go 1.21`)
+  2. Or specify Go version in Render settings: **Go Version** → `1.21`
+  3. Render supports Go 1.19, 1.20, 1.21, 1.22, 1.23
 
 ### "Migrations folder not found"
 - **Cause**: Root directory set to `backend/` but migrations are at root
