@@ -41,7 +41,7 @@ func ProcessJob(job *worker.Job, db *sqlx.DB, w *worker.Worker) error {
 	var fileContent []byte
 	var err error
 	
-	if job.FileContent != nil && len(job.FileContent) > 0 {
+	if len(job.FileContent) > 0 {
 		fileContent = job.FileContent
 		log.Printf("Using file content from database (%d bytes)", len(fileContent))
 	} else if job.FilePath != "" {
@@ -156,8 +156,10 @@ func (p *Processor) processCSVFromContent(fileContent []byte) error {
 		
 		match := MatchTransaction(row.Description, row.Amount, row.TransactionDate, filteredCandidates)
 		
-		// Mark invoice as matched if auto_matched or needs_review
-		if match.InvoiceID != nil && (match.Status == "auto_matched" || match.Status == "needs_review") {
+		// CRITICAL FIX: Only remove invoices from pool if auto_matched (high confidence)
+		// needs_review transactions aren't confirmed yet - keep them in pool for other transactions
+		// This prevents invoice pool depletion as we process large batches
+		if match.InvoiceID != nil && match.Status == "auto_matched" {
 			p.MatchedInvoices[*match.InvoiceID] = true
 		}
 
