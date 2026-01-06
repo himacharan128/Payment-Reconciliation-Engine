@@ -216,6 +216,9 @@ func extractNameFromDescription(desc string) string {
 		"CHK", "DEP", "PMT", "ACH", "REF", "MISC", "AUTH", "SETTLEMENT",
 		"BATCH", "PROCESSING", "FEE", "CHARGE", "ADJUSTMENT", "CLEARING",
 		"REVERSAL", "VOID", "RETURN", "DISPUTE", "CHARGEBACK",
+		// Additional common banking terms
+		"RECEIVED", "REBATE", "VENDOR", "CUSTOMER", "LOYALTY", "BONUS",
+		"FROM", "REFUND", "TO", "BY", "VIA", "THROUGH",
 	}
 
 	desc = strings.ToUpper(desc)
