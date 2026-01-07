@@ -134,6 +134,7 @@ This is O(1) regardless of page position because it uses the index directly.
 - WebSocket/SSE instead of polling for real-time progress
 - ML-based matching using historical confirmed matches
 - Reference number matching as additional signal
+- Export Unmatched: Currently uses client-side CSV generation from fetched transactions. A dedicated backend endpoint would be more efficient for very large datasets
 
 **Scaling limits:**
 - Current: ~10K transactions/batch comfortably
@@ -150,14 +151,8 @@ This is O(1) regardless of page position because it uses the index directly.
 
 | Metric | Result | Target |
 |--------|--------|--------|
-| 1,000 transactions | **~4 seconds** | <30 seconds ✅ |
+| 1,000 transactions | **~5 seconds** | <30 seconds ✅ |
 | 10,000 transactions | **~15 seconds** | - ✅ |
 | Invoice search | **~100ms** | <200ms ✅ |
 | Bulk confirm | **<1 second** | <5 seconds ✅ |
-
-**Match distribution (10K transactions):**
-- Auto-matched: 37.6% (target: 35-45%) ✅
-- Needs review: 32.9% (target: 25-35%) ✅
-- Unmatched: 29.5% (target: 25-35%) ✅
-
 ---
