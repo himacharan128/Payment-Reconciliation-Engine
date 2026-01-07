@@ -22,7 +22,6 @@ type Processor struct {
 	InvoiceCache  *InvoiceCache
 	BatchSize     int
 	ProgressEvery int
-	MatchedInvoices map[string]bool // Track matched invoices to prevent duplicates
 }
 
 type TransactionRow struct {
@@ -36,12 +35,24 @@ func ProcessJob(job *worker.Job, db *sqlx.DB, w *worker.Worker) error {
 	startTime := time.Now()
 	log.Printf("Starting CSV processing: batch_id=%s", job.BatchID)
 	log.Printf("Job details: file_path=%s, file_content_len=%d", job.FilePath, len(job.FileContent))
+	
+	// Initialize debug logging if DEBUG_FILE env var is set
+	debugFile := os.Getenv("DEBUG_FILE")
+	if debugFile != "" {
+		InitDebugLog(debugFile)
+		defer CloseDebugLog()
+		debugLog("=== PROCESSING JOB: batch_id=%s ===", job.BatchID)
+		debugLog("Timestamp: %s", startTime.Format(time.RFC3339))
+	}
+	
+	// Reset transaction counter for this job
+	debugTxnCounter = 0
 
 	// Get file content - prefer database, fallback to file system
 	var fileContent []byte
 	var err error
 	
-	if len(job.FileContent) > 0 {
+	if job.FileContent != nil && len(job.FileContent) > 0 {
 		fileContent = job.FileContent
 		log.Printf("Using file content from database (%d bytes)", len(fileContent))
 	} else if job.FilePath != "" {
@@ -75,7 +86,6 @@ func ProcessJob(job *worker.Job, db *sqlx.DB, w *worker.Worker) error {
 		InvoiceCache:  cache,
 		BatchSize:     500,
 		ProgressEvery: 200,
-		MatchedInvoices: make(map[string]bool),
 	}
 
 	// Process CSV from content (database or file system)
@@ -143,25 +153,11 @@ func (p *Processor) processCSVFromContent(fileContent []byte) error {
 			continue
 		}
 
-		// Match transaction
+		// Match transaction against all invoices with matching amount
+		// Note: Same invoice CAN be matched by multiple transactions (e.g., duplicate payments)
+		// The reconciliation system should flag these for review, not prevent matching
 		candidates := p.InvoiceCache.ByAmount[row.Amount]
-		
-		// Filter out already-matched invoices
-		filteredCandidates := make([]*InvoiceCandidate, 0, len(candidates))
-		for _, cand := range candidates {
-			if !p.MatchedInvoices[cand.ID] {
-				filteredCandidates = append(filteredCandidates, cand)
-			}
-		}
-		
-		match := MatchTransaction(row.Description, row.Amount, row.TransactionDate, filteredCandidates)
-		
-		// CRITICAL FIX: Only remove invoices from pool if auto_matched (high confidence)
-		// needs_review transactions aren't confirmed yet - keep them in pool for other transactions
-		// This prevents invoice pool depletion as we process large batches
-		if match.InvoiceID != nil && match.Status == "auto_matched" {
-			p.MatchedInvoices[*match.InvoiceID] = true
-		}
+		match := MatchTransaction(row.Description, row.Amount, row.TransactionDate, candidates)
 
 		// Accumulate for batch insert
 		batch = append(batch, row)
