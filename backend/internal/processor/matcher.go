@@ -129,10 +129,11 @@ func MatchTransaction(
 		dateAdjustment := calculateDateAdjustment(dateDelta)
 		
 		// Ambiguity penalty (if multiple candidates)
-		// Only penalize if there are 3+ candidates (2 candidates is common and acceptable)
+		// Reduced penalty to allow more auto-matches when name similarity is high
+		// Only apply significant penalty for 4+ candidates
 		ambiguityPenalty := 0.0
-		if len(candidates) > 2 {
-			ambiguityPenalty = float64(len(candidates)-2) * 1.5 // -1.5 points per extra candidate beyond 2
+		if len(candidates) > 3 {
+			ambiguityPenalty = float64(len(candidates)-3) * 1.0 // -1 point per extra candidate beyond 3
 		}
 		
 		// Final score: nameScore + dateAdjustment - ambiguityPenalty
@@ -190,14 +191,14 @@ func MatchTransaction(
 	best := scored[0]
 	
 	// Determine status based on final confidence score
-	// Thresholds calibrated for expected distribution:
-	// - Auto-matched: 35-45% (score >= 75, high confidence exact matches)
-	// - Needs review: 25-35% (score >= 45, fuzzy matches needing human review)
-	// - Unmatched: 25-35% (score < 45, too ambiguous or no good match)
+	// Thresholds as per BRD:
+	// - Auto-matched: ≥95% (high confidence)
+	// - Needs review: 60-94% (medium confidence, needs human confirmation)
+	// - Unmatched: <60% (low confidence)
 	status := "unmatched"
-	if best.finalScore >= 75.0 {
+	if best.finalScore >= 95.0 {
 		status = "auto_matched"
-	} else if best.finalScore >= 45.0 {
+	} else if best.finalScore >= 60.0 {
 		status = "needs_review"
 	}
 	
@@ -296,20 +297,21 @@ func buildMatchDetails(
 }
 
 func extractNameFromDescription(desc string) string {
-	// IMPROVED: Better noise token removal to prevent artifacts like "OSIT" from "DEPOSIT"
-	noiseTokens := []string{
-		"CHK", "DEP", "PMT", "PAYMENT", "ONLINE", "TRANSFER", "ACH",
-		"DEPOSIT", "WIRE", "CHECK", "REF", "REFERENCE", "MISC",
-		"DEBIT", "CREDIT", "TXN", "TRANSACTION", "FEE", "CHARGE",
-		"FROM", "TO", "VIA", "ATM", "POS", "MOBILE", "WEB",
-		"EXTERNAL", "INTERNAL", "INCOMING", "OUTGOING", "COUNTER",
-		"VENDOR", "REBATE", "UNKNOWN", "BANK", "CASH",
+	// Noise tokens commonly found in bank descriptions
+	noiseTokens := map[string]bool{
+		"CHK": true, "DEP": true, "PMT": true, "PAYMENT": true, "ONLINE": true,
+		"TRANSFER": true, "ACH": true, "DEPOSIT": true, "WIRE": true, "CHECK": true,
+		"REF": true, "REFERENCE": true, "MISC": true, "DEBIT": true, "CREDIT": true,
+		"TXN": true, "TRANSACTION": true, "FEE": true, "CHARGE": true, "FROM": true,
+		"TO": true, "VIA": true, "ATM": true, "POS": true, "MOBILE": true, "WEB": true,
+		"EXTERNAL": true, "INTERNAL": true, "INCOMING": true, "OUTGOING": true,
+		"COUNTER": true, "VENDOR": true, "REBATE": true, "UNKNOWN": true, "BANK": true,
+		"CASH": true, "PURCHASE": true,
 	}
 	
 	desc = strings.ToUpper(desc)
 	
-	// First, remove all non-alphabetic characters except spaces
-	// This prevents partial word matches and artifacts
+	// Remove all non-alphabetic characters except spaces
 	var cleaned strings.Builder
 	for _, ch := range desc {
 		if (ch >= 'A' && ch <= 'Z') || ch == ' ' {
@@ -323,19 +325,12 @@ func extractNameFromDescription(desc string) string {
 	var filteredWords []string
 	
 	for _, word := range words {
-		isNoise := false
-		// Check if entire word is a noise token
-		for _, token := range noiseTokens {
-			if word == token {
-				isNoise = true
-				break
-			}
+		if noiseTokens[word] {
+			continue // Skip noise tokens
 		}
-		// Also filter out very short words (likely abbreviations/noise) unless they're initials
-		if !isNoise && len(word) >= 2 {
-			filteredWords = append(filteredWords, word)
-		} else if !isNoise && len(word) == 1 && len(filteredWords) > 0 {
-			// Keep single letters if they appear to be initials (between other words)
+		// Keep single letters (likely initials like "S" in "S ADAMS")
+		// Keep all words 2+ chars that aren't noise
+		if len(word) >= 1 {
 			filteredWords = append(filteredWords, word)
 		}
 	}
@@ -345,25 +340,31 @@ func extractNameFromDescription(desc string) string {
 }
 
 func calculateDateAdjustment(daysDelta int) float64 {
-	// Transaction before due date: +5 points
+	// Transaction before due date: +5 points (early payment is strong signal)
 	if daysDelta < 0 {
 		return 5.0
 	}
-	// Transaction on or near due date (0-7 days): +2 points
+	// Transaction on or near due date (0-7 days): +3 points
 	if daysDelta <= 7 {
-		return 2.0
+		return 3.0
 	}
-	// Transaction 8-30 days after: 0 points
+	// Transaction 8-14 days after: +1 point (still reasonable)
+	if daysDelta <= 14 {
+		return 1.0
+	}
+	// Transaction 15-30 days after: 0 points
 	if daysDelta <= 30 {
 		return 0.0
 	}
-	// Transaction >30 days after: -10 points
-	return -10.0
+	// Transaction >30 days after: -5 points
+	return -5.0
 }
 
-// Jaro-Winkler similarity (proper implementation)
+// jaroWinkler calculates enhanced name similarity that handles:
+// 1. Standard Jaro-Winkler character similarity
+// 2. Token reordering (SMITH JOHN vs JOHN SMITH)
+// 3. Token overlap for partial matches
 func jaroWinkler(s1, s2 string) float64 {
-	// Normalize to uppercase for case-insensitive comparison
 	s1 = strings.ToUpper(s1)
 	s2 = strings.ToUpper(s2)
 	
@@ -375,29 +376,149 @@ func jaroWinkler(s1, s2 string) float64 {
 		return 0.0
 	}
 	
-	// Convert to rune slices for proper unicode handling
+	// Calculate multiple similarity measures and take the best
+	scores := []float64{
+		jaroWinklerRaw(s1, s2),                    // Standard character-based
+		tokenSortedJaroWinkler(s1, s2),            // Compare with sorted tokens
+		tokenOverlapScore(s1, s2),                 // Token intersection score
+	}
+	
+	// Return the maximum score
+	maxScore := scores[0]
+	for _, score := range scores[1:] {
+		if score > maxScore {
+			maxScore = score
+		}
+	}
+	
+	return maxScore
+}
+
+// tokenSortedJaroWinkler sorts tokens alphabetically before comparing
+// This handles "SMITH JOHN" vs "JOHN SMITH" → both become "JOHN SMITH"
+func tokenSortedJaroWinkler(s1, s2 string) float64 {
+	tokens1 := strings.Fields(s1)
+	tokens2 := strings.Fields(s2)
+	
+	sort.Strings(tokens1)
+	sort.Strings(tokens2)
+	
+	sorted1 := strings.Join(tokens1, " ")
+	sorted2 := strings.Join(tokens2, " ")
+	
+	return jaroWinklerRaw(sorted1, sorted2)
+}
+
+// tokenOverlapScore calculates similarity based on token intersection
+// Handles partial matches like "S ADAMS" vs "SARAH ADAMS"
+func tokenOverlapScore(s1, s2 string) float64 {
+	tokens1 := strings.Fields(s1)
+	tokens2 := strings.Fields(s2)
+	
+	if len(tokens1) == 0 || len(tokens2) == 0 {
+		return 0.0
+	}
+	
+	// Count exact token matches
+	exactMatches := 0
+	partialMatches := 0.0
+	
+	matched2 := make([]bool, len(tokens2))
+	
+	for _, t1 := range tokens1 {
+		bestMatch := 0.0
+		bestIdx := -1
+		
+		for j, t2 := range tokens2 {
+			if matched2[j] {
+				continue
+			}
+			
+			// Exact match
+			if t1 == t2 {
+				if bestMatch < 100.0 {
+					bestMatch = 100.0
+					bestIdx = j
+				}
+			} else if len(t1) == 1 && len(t2) > 1 && t2[0] == t1[0] {
+				// Initial match: "S" matches "SARAH"
+				score := 90.0
+				if score > bestMatch {
+					bestMatch = score
+					bestIdx = j
+				}
+			} else if len(t2) == 1 && len(t1) > 1 && t1[0] == t2[0] {
+				// Reverse initial match: "SARAH" matches "S"
+				score := 90.0
+				if score > bestMatch {
+					bestMatch = score
+					bestIdx = j
+				}
+			} else {
+				// Partial string match
+				score := jaroWinklerRaw(t1, t2)
+				if score > bestMatch && score >= 80.0 {
+					bestMatch = score
+					bestIdx = j
+				}
+			}
+		}
+		
+		if bestIdx >= 0 {
+			matched2[bestIdx] = true
+			if bestMatch >= 100.0 {
+				exactMatches++
+			}
+			partialMatches += bestMatch
+		}
+	}
+	
+	// Calculate score based on coverage
+	maxTokens := float64(max(len(tokens1), len(tokens2)))
+	minTokens := float64(min(len(tokens1), len(tokens2)))
+	
+	// Weighted average: consider both coverage and quality of matches
+	coverageScore := partialMatches / maxTokens
+	
+	// Bonus for matching all tokens in shorter string
+	if exactMatches == int(minTokens) {
+		coverageScore = math.Max(coverageScore, 90.0)
+	}
+	
+	return coverageScore
+}
+
+// jaroWinklerRaw is the standard Jaro-Winkler algorithm
+func jaroWinklerRaw(s1, s2 string) float64 {
+	if s1 == s2 {
+		return 100.0
+	}
+	
+	if len(s1) == 0 || len(s2) == 0 {
+		return 0.0
+	}
+	
 	r1 := []rune(s1)
 	r2 := []rune(s2)
 	len1 := len(r1)
 	len2 := len(r2)
 	
-	// Calculate match window (max distance for matching characters)
-	matchWindow := int(math.Max(float64(len1), float64(len2))/2.0) - 1
+	// Match window
+	matchWindow := max(len1, len2)/2 - 1
 	if matchWindow < 1 {
 		matchWindow = 1
 	}
 	
-	// Track which characters have been matched
 	s1Matches := make([]bool, len1)
 	s2Matches := make([]bool, len2)
 	
 	matches := 0
 	transpositions := 0
 	
-	// Find matches within the match window
+	// Find matches
 	for i := 0; i < len1; i++ {
-		start := int(math.Max(0, float64(i-matchWindow)))
-		end := int(math.Min(float64(len2), float64(i+matchWindow+1)))
+		start := max(0, i-matchWindow)
+		end := min(len2, i+matchWindow+1)
 		
 		for j := start; j < end; j++ {
 			if s2Matches[j] || r1[i] != r2[j] {
@@ -414,7 +535,7 @@ func jaroWinkler(s1, s2 string) float64 {
 		return 0.0
 	}
 	
-	// Count transpositions (matched characters in different order)
+	// Count transpositions
 	k := 0
 	for i := 0; i < len1; i++ {
 		if !s1Matches[i] {
@@ -429,14 +550,14 @@ func jaroWinkler(s1, s2 string) float64 {
 		k++
 	}
 	
-	// Calculate Jaro similarity
+	// Jaro similarity
 	jaro := (float64(matches)/float64(len1) +
 		float64(matches)/float64(len2) +
 		float64(matches-transpositions/2)/float64(matches)) / 3.0
 	
-	// Calculate common prefix (up to 4 characters)
+	// Winkler prefix bonus
 	prefixLen := 0
-	maxPrefix := int(math.Min(4, math.Min(float64(len1), float64(len2))))
+	maxPrefix := min(4, min(len1, len2))
 	for i := 0; i < maxPrefix; i++ {
 		if r1[i] == r2[i] {
 			prefixLen++
@@ -445,8 +566,21 @@ func jaroWinkler(s1, s2 string) float64 {
 		}
 	}
 	
-	// Apply Winkler prefix bonus (scaling factor p=0.1)
 	winkler := jaro + (0.1 * float64(prefixLen) * (1.0 - jaro))
 	
 	return winkler * 100.0
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

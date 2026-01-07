@@ -72,19 +72,20 @@ func TestMatchTransaction_DateAdjustment(t *testing.T) {
 		t.Errorf("Expected adjustment +5.0, got %.1f", adjustment)
 	}
 	
-	// Transaction >30 days after should get -10 adjustment
+	// Transaction >30 days after should get -5 adjustment
 	result2 := MatchTransaction("JOHN SMITH", "450.00",
 		time.Date(2025, 1, 15, 0, 0, 0, 0, time.UTC), candidates)
 	
 	dateInfo2 := result2.MatchDetails["date"].(map[string]interface{})
 	adjustment2 := dateInfo2["adjustment"].(float64)
 	
-	if adjustment2 != -10.0 {
-		t.Errorf("Expected adjustment -10.0, got %.1f", adjustment2)
+	if adjustment2 != -5.0 {
+		t.Errorf("Expected adjustment -5.0, got %.1f", adjustment2)
 	}
 }
 
 func TestMatchTransaction_AmbiguityPenalty(t *testing.T) {
+	// Test with 4+ candidates to trigger penalty (penalty starts at 4+ candidates)
 	candidates := []*InvoiceCandidate{
 		{
 			ID:            "inv-1",
@@ -104,6 +105,24 @@ func TestMatchTransaction_AmbiguityPenalty(t *testing.T) {
 			NormalizedName: "JANE SMITH",
 			Status:        "sent",
 		},
+		{
+			ID:            "inv-3",
+			InvoiceNumber: "INV-003",
+			Amount:        "450.00",
+			DueDate:       time.Date(2024, 12, 10, 0, 0, 0, 0, time.UTC),
+			CustomerName:  "Jake Smith",
+			NormalizedName: "JAKE SMITH",
+			Status:        "sent",
+		},
+		{
+			ID:            "inv-4",
+			InvoiceNumber: "INV-004",
+			Amount:        "450.00",
+			DueDate:       time.Date(2024, 12, 10, 0, 0, 0, 0, time.UTC),
+			CustomerName:  "James Smith",
+			NormalizedName: "JAMES SMITH",
+			Status:        "sent",
+		},
 	}
 	
 	result := MatchTransaction("JOHN SMITH", "450.00",
@@ -113,11 +132,12 @@ func TestMatchTransaction_AmbiguityPenalty(t *testing.T) {
 	candidateCount := ambiguityInfo["candidateCount"].(int)
 	penalty := ambiguityInfo["penalty"].(float64)
 	
-	if candidateCount != 2 {
-		t.Errorf("Expected 2 candidates, got %d", candidateCount)
+	if candidateCount != 4 {
+		t.Errorf("Expected 4 candidates, got %d", candidateCount)
 	}
-	if penalty != 2.0 { // (2-1)*2 = 2.0
-		t.Errorf("Expected penalty 2.0, got %.1f", penalty)
+	// Penalty only applies for candidates > 3, so (4-3)*1.0 = 1.0
+	if penalty != 1.0 {
+		t.Errorf("Expected penalty 1.0, got %.1f", penalty)
 	}
 }
 
